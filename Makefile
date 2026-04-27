@@ -198,15 +198,7 @@ UPROGS=\
 	$U/_logstress\
 	$U/_forphan\
 	$U/_dorphan\
-
-
-
-
-ifeq ($(LAB),syscall)
-UPROGS += \
-	$U/_attack\
-	$U/_secret
-endif
+	$U/_sandbox\
 
 ifeq ($(LAB),lock)
 UPROGS += \

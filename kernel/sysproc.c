@@ -105,3 +105,21 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+uint64
+sys_interpose(void)
+{
+  int mask;
+  struct proc *p = myproc();
+
+  argint(0, &mask);
+  if(argstr(1, p->interpose_path, MAXPATH) < 0)
+    return -1;
+
+  // "-" means there is no path exception.
+  if(strncmp(p->interpose_path, "-", MAXPATH) == 0)
+    p->interpose_path[0] = 0;
+
+  p->interpose_mask = mask;
+  return 0;
+}
