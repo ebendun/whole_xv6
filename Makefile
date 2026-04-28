@@ -196,7 +196,9 @@ UPROGS=\
 	$U/_logstress\
 	$U/_forphan\
 	$U/_dorphan\
-
+	$U/_call\
+	$U/_bttest\
+	$U/_alarmtest
 
 
 ifeq ($(LAB),util)
@@ -219,11 +221,7 @@ UPROGS += \
 	$U/_stats
 endif
 
-ifeq ($(LAB),traps)
-UPROGS += \
-	$U/_call\
-	$U/_bttest
-endif
+
 
 ifeq ($(LAB),lazy)
 UPROGS += \

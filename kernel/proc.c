@@ -140,6 +140,12 @@ found:
     return 0;
   }
 
+  memset(&p->alarm_trapframe, 0, sizeof(p->alarm_trapframe));
+  p->alarm_interval = 0;
+  p->alarm_ticks = 0;
+  p->alarm_handler = 0;
+  p->alarm_inflight = 0;
+
   // Set up new context to start executing at forkret,
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
@@ -168,6 +174,10 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  p->alarm_interval = 0;
+  p->alarm_ticks = 0;
+  p->alarm_handler = 0;
+  p->alarm_inflight = 0;
   p->state = UNUSED;
 }
 
