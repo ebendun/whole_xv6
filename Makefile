@@ -196,23 +196,7 @@ UPROGS=\
 	$U/_logstress\
 	$U/_forphan\
 	$U/_dorphan\
-
-
-
-ifeq ($(LAB),util)
-UPROGS += \
-	$U/_sleep\
-	$U/_sixfive\
-	$U/_find
-endif
-### ENDIF
-
-
-ifeq ($(LAB),syscall)
-UPROGS += \
-	$U/_attack\
-	$U/_secret
-endif
+	$U/_pgtbltest
 
 ifeq ($(LAB),lock)
 UPROGS += \
@@ -251,11 +235,6 @@ ph: notxv6/ph.c
 
 barrier: notxv6/barrier.c
 	gcc -o barrier -g -O2 $(XCFLAGS) notxv6/barrier.c -pthread
-endif
-
-ifeq ($(LAB),pgtbl)
-UPROGS += \
-	$U/_pgtbltest
 endif
 
 ifeq ($(LAB),lock)
@@ -322,7 +301,7 @@ endif
 FWDPORT1 = $(shell expr `id -u` % 5000 + 25999)
 FWDPORT2 = $(shell expr `id -u` % 5000 + 30999)
 
-QEMUOPTS = -machine virt -bios none -kernel $K/kernel -m 128M -smp $(CPUS) -nographic
+QEMUOPTS = -machine virt -bios none -kernel $K/kernel -m 256M -smp $(CPUS) -nographic
 QEMUOPTS += -global virtio-mmio.force-legacy=false
 QEMUOPTS += -drive file=fs.img,if=none,format=raw,id=x0
 QEMUOPTS += -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0

@@ -89,7 +89,6 @@ sys_pause(void)
 }
 
 
-#ifdef LAB_PGTBL
 int
 sys_pgpte(void)
 {
@@ -104,9 +103,7 @@ sys_pgpte(void)
   }
   return 0;
 }
-#endif
 
-#ifdef LAB_PGTBL
 int
 sys_kpgtbl(void)
 {
@@ -116,7 +113,6 @@ sys_kpgtbl(void)
   vmprint(p->pagetable);
   return 0;
 }
-#endif
 
 
 uint64

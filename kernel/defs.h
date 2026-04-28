@@ -66,6 +66,8 @@ void            ireclaim(int);
 void*           kalloc(void);
 void            kfree(void *);
 void            kinit(void);
+void*           superalloc(void);
+void            superfree(void *);
 
 // log.c
 void            initlog(int, struct superblock*);
@@ -185,12 +187,8 @@ int             copyin(pagetable_t, char *, uint64, uint64);
 int             copyinstr(pagetable_t, char *, uint64, uint64);
 int             ismapped(pagetable_t, uint64);
 uint64          vmfault(pagetable_t, uint64, int);
-#if defined(LAB_PGTBL) || defined(SOL_MMAP)
 void            vmprint(pagetable_t);
-#endif
-#ifdef LAB_PGTBL
 pte_t*          pgpte(pagetable_t, uint64);
-#endif
 
 // plic.c
 void            plicinit(void);
@@ -205,14 +203,6 @@ void            virtio_disk_intr(void);
 
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
-
-
-
-#ifdef LAB_PGTBL
-// vmcopyin.c
-int             copyin_new(pagetable_t, char *, uint64, uint64);
-int             copyinstr_new(pagetable_t, char *, uint64, uint64);
-#endif
 
 #ifdef LAB_LOCK
 // stats.c
