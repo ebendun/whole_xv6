@@ -241,18 +241,6 @@ vmprint(pagetable_t pagetable) {
   }
 }
 
-
-
-// add a mapping to the kernel page table.
-// only used when booting.
-// does not flush TLB or enable paging.
-void
-kvmmap(pagetable_t kpgtbl, uint64 va, uint64 pa, uint64 sz, int perm)
-{
-  if(mappages(kpgtbl, va, sz, pa, perm) != 0)
-    panic("kvmmap");
-}
-
 // Create PTEs for virtual addresses starting at va that refer to
 // physical addresses starting at pa.
 // va and size MUST be page-aligned.
@@ -542,6 +530,15 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
   pte_t *pte;
+  struct proc *p = myproc();
+  uint64 psz;
+
+  if(p == 0)
+    return -1;
+
+  psz = (pagetable == p->pagetable) ? p->sz : MAXVA;
+  if(dstva >= psz || len > psz - dstva)
+    return -1;
 
   while(len > 0){
     va0 = PGROUNDDOWN(dstva);
@@ -583,6 +580,15 @@ int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
   uint64 n, va0, pa0;
+  struct proc *p = myproc();
+  uint64 psz;
+
+  if(p == 0)
+    return -1;
+
+  psz = (pagetable == p->pagetable) ? p->sz : MAXVA;
+  if(srcva >= psz || len > psz - srcva)
+    return -1;
   
   while(len > 0){
     va0 = PGROUNDDOWN(srcva);
@@ -613,9 +619,20 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
   uint64 n, va0, pa0;
   int got_null = 0;
+  struct proc *p = myproc();
+  uint64 psz;
+
+  if(p == 0)
+    return -1;
+
+  psz = (pagetable == p->pagetable) ? p->sz : MAXVA;
+  if(srcva >= psz)
+    return -1;
 
   while(got_null == 0 && max > 0){
     va0 = PGROUNDDOWN(srcva);
+    if(va0 >= psz)
+      return -1;
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0)
       return -1;
