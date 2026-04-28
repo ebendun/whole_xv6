@@ -1,8 +1,4 @@
-#ifdef LAB_FS
-#define NPROC        10  // maximum number of processes
-#else
-#define NPROC        64  // maximum number of processes (speedsup bigfile)
-#endif
+#define NPROC        64  // maximum number of processes
 #define NCPU          8  // maximum number of CPUs
 #define NOFILE       16  // open files per process
 #define NFILE       100  // open files per system
@@ -24,10 +20,6 @@
 #endif
 #define MAXPATH      128   // maximum file path name
 
-#ifdef LAB_UTIL
 #define USERSTACK    2     // user stack pages
-#else
-#define USERSTACK    1     // user stack pages
-#endif
 
 

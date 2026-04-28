@@ -25,6 +25,9 @@ char* sys_sbrk(int,int);
 int pause(int);
 int uptime(void);
 int interpose(int, const char*);
+int ugetpid(void);
+uint64 pgpte(void*);
+void kpgtbl(void);
 
 // ulib.c
 int stat(const char*, struct stat*);

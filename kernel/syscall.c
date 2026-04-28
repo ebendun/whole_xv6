@@ -6,6 +6,9 @@
 #include "proc.h"
 #include "syscall.h"
 #include "defs.h"
+#include "fs.h"
+#include "sleeplock.h"
+#include "file.h"
 
 // Fetch the uint64 at addr from the current process.
 int
@@ -117,6 +120,9 @@ interpose_allow_path(struct proc *p, int num)
   return strncmp(path, p->interpose_path, MAXPATH) == 0;
 }
 
+extern uint64 sys_pgpte(void);
+extern uint64 sys_kpgtbl(void);
+
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
 static uint64 (*syscalls[])(void) = {
@@ -142,7 +148,10 @@ static uint64 (*syscalls[])(void) = {
 [SYS_mkdir]   sys_mkdir,
 [SYS_close]   sys_close,
 [SYS_interpose] sys_interpose,
+[SYS_pgpte] sys_pgpte,
+[SYS_kpgtbl] sys_kpgtbl,
 };
+
 
 void
 syscall(void)

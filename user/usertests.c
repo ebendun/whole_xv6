@@ -2686,12 +2686,22 @@ lazy_copy(char *s)
   };
   for(int i = 0; i < sizeof(bad)/sizeof(bad[0]); i++){
     int fd = open("README", 0);
-    if(fd < 0) { printf("cannot open README\n"); exit(1); }
-    if(read(fd, (char*)bad[i], 512) >= 0) { printf("read succeeded\n");  exit(1); }
+    if(fd < 0) {
+      printf("cannot open README\n");
+      exit(1);
+    }
+    if(read(fd, (char*)bad[i], 512) >= 0) {
+      printf("read %lx succeeded\n", bad[i]);
+      exit(1);
+    }
     close(fd);
     fd = open("junk", O_CREATE|O_RDWR|O_TRUNC);
-    if(fd < 0) { printf("cannot open junk\n"); exit(1); }
-    if(write(fd, (char*)bad[i], 512) >= 0) { printf("write succeeded\n"); exit(1); }
+    if(fd < 0) {
+      printf("cannot open junk\n"); exit(1);
+    }
+    if(write(fd, (char*)bad[i], 512) >= 0) {
+      printf("write %lx succeeded\n", bad[i]); exit(1);
+    }
     close(fd);
   }
 

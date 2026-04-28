@@ -67,7 +67,6 @@ sys_pause(void)
 {
   int n;
   uint ticks0;
-
   argint(0, &n);
   if(n < 0)
     n = 0;
@@ -83,6 +82,33 @@ sys_pause(void)
   release(&tickslock);
   return 0;
 }
+
+
+int
+sys_pgpte(void)
+{
+  uint64 va;
+  struct proc *p;  
+
+  p = myproc();
+  argaddr(0, &va);
+  pte_t *pte = pgpte(p->pagetable, va);
+  if(pte != 0) {
+      return (uint64) *pte;
+  }
+  return 0;
+}
+
+int
+sys_kpgtbl(void)
+{
+  struct proc *p;  
+
+  p = myproc();
+  vmprint(p->pagetable);
+  return 0;
+}
+
 
 uint64
 sys_kill(void)

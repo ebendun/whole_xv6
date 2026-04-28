@@ -43,3 +43,5 @@ entry("sbrk");
 entry("pause");
 entry("uptime");
 entry("interpose");
+entry("pgpte");
+entry("kpgtbl");

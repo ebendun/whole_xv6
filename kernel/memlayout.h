@@ -37,7 +37,7 @@
 // for use by the kernel and user pages
 // from physical address 0x80000000 to PHYSTOP.
 #define KERNBASE 0x80000000L
-#define PHYSTOP (KERNBASE + 128*1024*1024)
+#define PHYSTOP (KERNBASE + 256*1024*1024)
 
 // map the trampoline page to the highest address,
 // in both user and kernel space.
@@ -45,7 +45,7 @@
 
 // map kernel stacks beneath the trampoline,
 // each surrounded by invalid guard pages.
-#define KSTACK(p) (TRAMPOLINE - ((p)+1)* 2*PGSIZE)
+#define KSTACK(p) (TRAMPOLINE - (p)*2*PGSIZE - 3*PGSIZE)
 
 // User memory layout.
 // Address zero first:
@@ -54,6 +54,14 @@
 //   fixed-size stack
 //   expandable heap
 //   ...
+//   USYSCALL (shared with kernel)
 //   TRAPFRAME (p->trapframe, used by the trampoline)
 //   TRAMPOLINE (the same page as in the kernel)
 #define TRAPFRAME (TRAMPOLINE - PGSIZE)
+#define USYSCALL (TRAPFRAME - PGSIZE)
+
+#ifndef __ASSEMBLER__
+struct usyscall {
+  int pid;  // Process ID
+};
+#endif
