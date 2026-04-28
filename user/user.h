@@ -28,6 +28,8 @@ int interpose(int, const char*);
 int ugetpid(void);
 uint64 pgpte(void*);
 void kpgtbl(void);
+int sigalarm(int, void (*handler)());
+int sigreturn(void);
 
 // ulib.c
 int stat(const char*, struct stat*);

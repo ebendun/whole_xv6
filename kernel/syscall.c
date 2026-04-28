@@ -105,6 +105,10 @@ extern uint64 sys_link(void);
 extern uint64 sys_mkdir(void);
 extern uint64 sys_close(void);
 extern uint64 sys_interpose(void);
+extern uint64 sys_pgpte(void);
+extern uint64 sys_kpgtbl(void);
+extern uint64 sys_sigalarm(void);
+extern uint64 sys_sigreturn(void);
 
 static int
 interpose_allow_path(struct proc *p, int num)
@@ -120,8 +124,6 @@ interpose_allow_path(struct proc *p, int num)
   return strncmp(path, p->interpose_path, MAXPATH) == 0;
 }
 
-extern uint64 sys_pgpte(void);
-extern uint64 sys_kpgtbl(void);
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -150,6 +152,8 @@ static uint64 (*syscalls[])(void) = {
 [SYS_interpose] sys_interpose,
 [SYS_pgpte] sys_pgpte,
 [SYS_kpgtbl] sys_kpgtbl,
+[SYS_sigalarm]  sys_sigalarm,
+[SYS_sigreturn] sys_sigreturn,
 };
 
 

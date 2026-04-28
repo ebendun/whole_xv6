@@ -201,16 +201,13 @@ UPROGS=\
 	$U/_dorphan\
 	$U/_sandbox\
 	$U/_pgtbltest
+	$U/_call\
+	$U/_bttest\
+	$U/_alarmtest
 
 ifeq ($(LAB),lock)
 UPROGS += \
 	$U/_stats
-endif
-
-ifeq ($(LAB),traps)
-UPROGS += \
-	$U/_call\
-	$U/_bttest
 endif
 
 ifeq ($(LAB),lazy)
@@ -298,6 +295,9 @@ endif
 ifeq ($(LAB),fs)
 CPUS := 1
 endif
+
+FWDPORT1 = $(shell expr `id -u` % 5000 + 25999)
+FWDPORT2 = $(shell expr `id -u` % 5000 + 30999)
 
 FWDPORT1 = $(shell expr `id -u` % 5000 + 25999)
 FWDPORT2 = $(shell expr `id -u` % 5000 + 30999)
