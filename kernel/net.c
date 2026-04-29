@@ -19,6 +19,19 @@ static uint8 host_mac[ETHADDR_LEN] = { 0x52, 0x55, 0x0a, 0x00, 0x02, 0x02 };
 
 static struct spinlock netlock;
 
+// One binding slot per UDP port we track, each with a finite queue.
+static struct udp_binding udp_bindings[MAX_UDP_PACKETS];
+
+static int
+find_binding(uint16 dport)
+{
+  for(int i = 0; i < MAX_UDP_PACKETS; i++){
+    if(udp_bindings[i].valid && udp_bindings[i].dport == dport)
+      return i;
+  }
+  return -1;
+}
+
 void
 netinit(void)
 {
@@ -34,11 +47,26 @@ netinit(void)
 uint64
 sys_bind(void)
 {
-  //
-  // Your code here.
-  //
+  int port;
+  argint(0, &port);
 
-  return -1;
+  acquire(&netlock);
+  if(find_binding((uint16)port) >= 0){
+    release(&netlock);
+    return -1;
+  }
+
+  for(int i = 0; i < MAX_UDP_PACKETS; i++){
+    if(udp_bindings[i].valid == 0){
+      memset(&udp_bindings[i], 0, sizeof(udp_bindings[i]));
+      udp_bindings[i].valid = 1;
+      udp_bindings[i].dport = (uint16)port;
+      release(&netlock);
+      return 0;
+    }
+  }
+  release(&netlock);
+  return 0;
 }
 
 //
@@ -49,9 +77,18 @@ sys_bind(void)
 uint64
 sys_unbind(void)
 {
-  //
-  // Optional: Your code here.
-  //
+  int port;
+  argint(0, &port);
+
+  acquire(&netlock);
+  int i = find_binding((uint16)port);
+  if(i < 0){
+    release(&netlock);
+    return -1;
+  }
+
+  memset(&udp_bindings[i], 0, sizeof(udp_bindings[i]));
+  release(&netlock);
 
   return 0;
 }
@@ -74,10 +111,49 @@ sys_unbind(void)
 uint64
 sys_recv(void)
 {
-  //
-  // Your code here.
-  //
-  return -1;
+  int dport;
+  uint64 src;
+  uint64 sport;
+  uint64 buf;
+  int maxlen;
+  argint(0, &dport);
+  argaddr(1, &src);
+  argaddr(2, &sport);
+  argaddr(3, &buf);
+  argint(4, &maxlen);
+
+  acquire(&netlock);
+  int i = find_binding((uint16)dport);
+  if(i < 0){
+    release(&netlock);
+    return -1;
+  }
+
+  while(udp_bindings[i].qcount == 0){
+    sleep(&udp_bindings[i], &netlock);
+  }
+
+  struct udp_pkt pkt = udp_bindings[i].q[udp_bindings[i].qhead];
+  udp_bindings[i].qhead = (udp_bindings[i].qhead + 1) % MAX_UDP_PACKETS;
+  udp_bindings[i].qcount--;
+
+  if(copyout(myproc()->pagetable, src, (char*)&pkt.sip, sizeof(uint32)) < 0 ||
+     copyout(myproc()->pagetable, sport, (char*)&pkt.sport, sizeof(uint16)) < 0){
+    release(&netlock);
+    return -1;
+  }
+
+  int len = pkt.payload_len;
+  if(len > maxlen)
+    len = maxlen;
+
+  if(copyout(myproc()->pagetable, buf, pkt.data, len) < 0){
+    release(&netlock);
+    return -1;
+  }
+
+  release(&netlock);
+  return len;
 }
 
 // This code is lifted from FreeBSD's ping.c, and is copyright by the Regents
@@ -174,7 +250,10 @@ sys_send(void)
     return -1;
   }
 
-  e1000_transmit(buf, total);
+  if(e1000_transmit(buf, total) < 0){
+    kfree(buf);
+    return -1;
+  }
 
   return 0;
 }
@@ -187,11 +266,37 @@ ip_rx(char *buf, int len)
   if(seen_ip == 0)
     printf("ip_rx: received an IP packet\n");
   seen_ip = 1;
+  struct eth* ineth = (struct eth*) buf;
+  struct ip* inip = (struct ip*) (ineth + 1);
 
-  //
-  // Your code here.
-  //
-  
+  if(inip->ip_p != IPPROTO_UDP){
+    kfree(buf);
+    return;
+  }
+
+  struct udp* udp = (struct udp*) (inip + 1);
+  acquire(&netlock);
+  int i = find_binding(ntohs(udp->dport));
+  if(i >= 0 && udp_bindings[i].qcount < MAX_UDP_PACKETS){
+    int payload_len = ntohs(udp->ulen) - sizeof(struct udp);
+    if(payload_len < 0)
+      payload_len = 0;
+    if(payload_len > MAX_PACKETS_SIZE)
+      payload_len = MAX_PACKETS_SIZE;
+
+    struct udp_pkt *slot = &udp_bindings[i].q[udp_bindings[i].qtail];
+    memmove(slot->data, (char*)(udp + 1), payload_len);
+    slot->payload_len = payload_len;
+    slot->sport = ntohs(udp->sport);
+    slot->sip = ntohl(inip->ip_src);
+
+    udp_bindings[i].qtail = (udp_bindings[i].qtail + 1) % MAX_UDP_PACKETS;
+    udp_bindings[i].qcount++;
+    wakeup(&udp_bindings[i]);
+  }
+
+  release(&netlock);
+  kfree(buf);
 }
 
 //

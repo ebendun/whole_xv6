@@ -125,3 +125,23 @@ struct dns_data {
   uint32 ttl;
   uint16 len;
 } __attribute__((packed));
+
+#define MAX_UDP_PACKETS 16
+#define MAX_PACKETS_SIZE 1500
+
+
+struct udp_pkt {
+  char data[MAX_PACKETS_SIZE];
+  uint16 sport;
+  uint32 sip;
+  uint32 payload_len;
+};
+
+struct udp_binding {
+  char valid;
+  uint16 dport;
+  struct udp_pkt q[MAX_UDP_PACKETS];
+  uint8 qhead;
+  uint8 qtail;
+  uint8 qcount;
+};
