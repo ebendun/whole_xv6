@@ -30,7 +30,10 @@ OBJS = \
   $K/sysfile.o \
   $K/kernelvec.o \
   $K/plic.o \
-  $K/virtio_disk.o
+  $K/virtio_disk.o\
+  $K/e1000.o \
+  $K/net.o \
+  $K/pci.o
 
 OBJS_KCSAN = \
   $K/start.o \
@@ -48,14 +51,6 @@ ifeq ($(LAB),lock)
 OBJS += \
 	$K/stats.o\
 	$K/sprintf.o
-endif
-
-
-ifeq ($(LAB),net)
-OBJS += \
-	$K/e1000.o \
-	$K/net.o \
-	$K/pci.o
 endif
 
 
@@ -109,10 +104,7 @@ CFLAGS += -fno-builtin-memcpy -Wno-main
 CFLAGS += -fno-builtin-printf -fno-builtin-fprintf -fno-builtin-vprintf
 CFLAGS += -I.
 CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
-
-ifeq ($(LAB),net)
 CFLAGS += -DNET_TESTS_PORT=$(SERVERPORT)
-endif
 
 ifdef KCSAN
 CFLAGS += -DKCSAN
@@ -205,6 +197,7 @@ UPROGS=\
 	$U/_bttest\
 	$U/_alarmtest\
 	$U/_cowtest\
+	$U/_nettest\
 
 ifeq ($(LAB),lock)
 UPROGS += \
@@ -236,15 +229,9 @@ UPROGS += \
 	$U/_bigfile
 endif
 
-
 ifeq ($(LAB),mmap)
 UPROGS += \
 	$U/_mmaptest
-endif
-
-ifeq ($(LAB),net)
-UPROGS += \
-	$U/_nettest
 endif
 
 UEXTRA=
@@ -290,11 +277,9 @@ QEMUOPTS = -machine virt -bios none -kernel $K/kernel -m 256M -smp $(CPUS) -nogr
 QEMUOPTS += -global virtio-mmio.force-legacy=false
 QEMUOPTS += -drive file=fs.img,if=none,format=raw,id=x0
 QEMUOPTS += -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
-
-ifeq ($(LAB),net)
 QEMUOPTS += -netdev user,id=net0,hostfwd=udp::$(FWDPORT1)-:2000,hostfwd=udp::$(FWDPORT2)-:2001 -object filter-dump,id=net0,netdev=net0,file=packets.pcap
 QEMUOPTS += -device e1000,netdev=net0,bus=pcie.0
-endif
+
 
 # makes a new fs.img
 qemu: check-qemu-version newfs.img $K/kernel fs.img
@@ -311,11 +296,8 @@ qemu-gdb: $K/kernel .gdbinit fs.img
 	@echo "*** Now run 'gdb' in another window." 1>&2
 	$(QEMU) $(QEMUOPTS) -S $(QEMUGDB)
 
-ifeq ($(LAB),net)
 # try to generate a unique port for the echo server
 SERVERPORT = $(shell expr `id -u` % 5000 + 25099)
-
-endif
 
 ##
 ##  FOR testing lab grading script

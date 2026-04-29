@@ -25,6 +25,8 @@
 #define VIRTIO0 0x10001000
 #define VIRTIO0_IRQ 1
 
+#define E1000_IRQ 33
+
 // qemu puts platform-level interrupt controller (PLIC) here.
 #define PLIC 0x0c000000L
 #define PLIC_PRIORITY (PLIC + 0x0)

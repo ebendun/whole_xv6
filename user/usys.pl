@@ -47,3 +47,7 @@ entry("pgpte");
 entry("kpgtbl");
 entry("sigalarm");
 entry("sigreturn");
+entry("bind");
+entry("unbind");
+entry("send");
+entry("recv");
