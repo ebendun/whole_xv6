@@ -114,4 +114,5 @@ struct proc {
   char name[16];               // Process name (debugging)
   int interpose_mask;          // Bit mask of blocked syscalls
   char interpose_path[MAXPATH];// Allowed path for masked open/exec
+  struct cpu *pincpu;
 };

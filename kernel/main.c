@@ -12,9 +12,7 @@ main()
 {
   if(cpuid() == 0){
     consoleinit();
-#if defined(LAB_LOCK)
     statsinit();
-#endif
     printfinit();
     printf("\n");
     printf("xv6 kernel is booting\n");
@@ -48,9 +46,5 @@ main()
     trapinithart();   // install kernel trap vector
     plicinithart();   // ask PLIC for device interrupts
   }
-
-#ifdef LAB_LOCK
-  rwspinlock_test();
-#endif
   scheduler();        
 }

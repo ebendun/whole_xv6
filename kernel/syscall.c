@@ -113,6 +113,7 @@ extern uint64 sys_bind(void);
 extern uint64 sys_unbind(void);
 extern uint64 sys_send(void);
 extern uint64 sys_recv(void);
+extern uint64 sys_cpupin(void);
 
 static int
 interpose_allow_path(struct proc *p, int num)
@@ -127,6 +128,7 @@ interpose_allow_path(struct proc *p, int num)
     return 0;
   return strncmp(path, p->interpose_path, MAXPATH) == 0;
 }
+
 
 // An array mapping syscall numbers from syscall.h
 // to the function that handles the system call.
@@ -161,6 +163,7 @@ static uint64 (*syscalls[])(void) = {
 [SYS_unbind] sys_unbind,
 [SYS_send] sys_send,
 [SYS_recv] sys_recv,
+[SYS_cpupin] sys_cpupin,
 };
 
 

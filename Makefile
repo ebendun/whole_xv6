@@ -33,7 +33,9 @@ OBJS = \
   $K/virtio_disk.o\
   $K/e1000.o \
   $K/net.o \
-  $K/pci.o
+  $K/pci.o\
+  $K/stats.o\
+  $K/sprintf.o\
 
 OBJS_KCSAN = \
   $K/start.o \
@@ -47,12 +49,12 @@ OBJS_KCSAN += \
 	$K/kcsan.o
 endif
 
-ifeq ($(LAB),lock)
-OBJS += \
-	$K/stats.o\
-	$K/sprintf.o
-endif
-
+OBJS_KCSAN = \
+  $K/start.o \
+  $K/console.o \
+  $K/printf.o \
+  $K/uart.o \
+  $K/spinlock.o
 
 # riscv64-unknown-elf- or riscv64-linux-gnu-
 # perhaps in /opt/riscv/bin
@@ -138,9 +140,8 @@ tags: $(OBJS)
 
 ULIB = $U/ulib.o $U/usys.o $U/printf.o $U/umalloc.o
 
-ifeq ($(LAB),lock)
+
 ULIB += $U/statistics.o
-endif
 
 _%: %.o $(ULIB) $U/user.ld
 	$(LD) $(LDFLAGS) -T $U/user.ld -o $@ $< $(ULIB)
@@ -198,12 +199,9 @@ UPROGS=\
 	$U/_alarmtest\
 	$U/_cowtest\
 	$U/_nettest\
-
-ifeq ($(LAB),lock)
-UPROGS += \
-	$U/_stats
-endif
-
+	$U/_stats\
+	$U/_kalloctest\
+	$U/_bcachetest\
 
 $U/uthread_switch.o : $U/uthread_switch.S
 	$(CC) $(CFLAGS) -c -o $U/uthread_switch.o $U/uthread_switch.S
@@ -218,11 +216,6 @@ ph: notxv6/ph.c
 barrier: notxv6/barrier.c
 	gcc -o barrier -g -O2 $(XCFLAGS) notxv6/barrier.c -pthread
 
-ifeq ($(LAB),lock)
-UPROGS += \
-	$U/_kalloctest\
-	$U/_bcachetest
-endif
 
 ifeq ($(LAB),fs)
 UPROGS += \
@@ -234,12 +227,10 @@ UPROGS += \
 	$U/_mmaptest
 endif
 
-UEXTRA=
-ifeq ($(LAB),util)
-	UEXTRA += user/findtest.sh
-	UEXTRA += user/sixfive.txt
-	UPROGS += $U/_memdump
-endif
+
+UEXTRA += user/findtest.sh
+UEXTRA += user/sixfive.txt
+UPROGS += $U/_memdump
 
 fs.img: mkfs/mkfs README $(UEXTRA) $(UPROGS)
 	mkfs/mkfs fs.img README $(UEXTRA) $(UPROGS)
@@ -265,9 +256,6 @@ QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
 	else echo "-s -p $(GDBPORT)"; fi)
 ifndef CPUS
 CPUS := 3
-endif
-ifeq ($(LAB),fs)
-CPUS := 1
 endif
 
 FWDPORT1 = $(shell expr `id -u` % 5000 + 25999)

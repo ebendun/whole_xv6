@@ -212,12 +212,34 @@ alloc3_desc(int *idx)
   return 0;
 }
 
+//
+// check that there are at most NBUF distinct
+// struct buf's, which the lock lab requires.
+//
+static struct buf *xbufs[NBUF];
+static void
+checkbuf(struct buf *b)
+{
+  for(int i = 0; i < NBUF; i++){
+    if(xbufs[i] == b){
+      return;
+    }
+    if(xbufs[i] == 0){
+      xbufs[i] = b;
+      return;
+    }
+  }
+  panic("more than NBUF bufs");
+}
+
 void
 virtio_disk_rw(struct buf *b, int write)
 {
   uint64 sector = b->blockno * (BSIZE / 512);
 
   acquire(&disk.vdisk_lock);
+
+  checkbuf(b);
 
   // the spec's Section 5.2 says that legacy block operations use
   // three descriptors: one for type/reserved/sector, one for the

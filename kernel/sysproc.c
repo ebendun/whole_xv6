@@ -1,10 +1,13 @@
 #include "types.h"
 #include "riscv.h"
-#include "defs.h"
 #include "param.h"
+#include "defs.h"
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
+#ifdef PGTBL_SOL
+#include "riscv.h"
+#endif
 #include "vm.h"
 
 uint64
@@ -99,7 +102,6 @@ sys_pgpte(void)
   }
   return 0;
 }
-
 int
 sys_kpgtbl(void)
 {
@@ -177,5 +179,19 @@ sys_interpose(void)
     p->interpose_path[0] = 0;
 
   p->interpose_mask = mask;
+  return 0;
+}
+uint64
+sys_cpupin(void)
+{
+  struct proc *p = myproc();
+  int cpu;
+
+  argint(0, &cpu);
+  if (cpu < 0 || cpu >= NCPU)
+    return -1;
+  acquire(&p->lock);
+  p->pincpu = &cpus[cpu];
+  release(&p->lock);
   return 0;
 }
