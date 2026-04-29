@@ -200,29 +200,17 @@ UPROGS=\
 	$U/_forphan\
 	$U/_dorphan\
 	$U/_sandbox\
-	$U/_pgtbltest
+	$U/_pgtbltest\
 	$U/_call\
 	$U/_bttest\
-	$U/_alarmtest
+	$U/_alarmtest\
+	$U/_cowtest\
 
 ifeq ($(LAB),lock)
 UPROGS += \
 	$U/_stats
 endif
 
-ifeq ($(LAB),lazy)
-UPROGS += \
-	$U/_lazytests
-endif
-
-ifeq ($(LAB),cow)
-UPROGS += \
-	$U/_cowtest
-endif
-
-ifeq ($(LAB),thread)
-UPROGS += \
-	$U/_uthread
 
 $U/uthread_switch.o : $U/uthread_switch.S
 	$(CC) $(CFLAGS) -c -o $U/uthread_switch.o $U/uthread_switch.S
@@ -236,7 +224,6 @@ ph: notxv6/ph.c
 
 barrier: notxv6/barrier.c
 	gcc -o barrier -g -O2 $(XCFLAGS) notxv6/barrier.c -pthread
-endif
 
 ifeq ($(LAB),lock)
 UPROGS += \
@@ -295,9 +282,6 @@ endif
 ifeq ($(LAB),fs)
 CPUS := 1
 endif
-
-FWDPORT1 = $(shell expr `id -u` % 5000 + 25999)
-FWDPORT2 = $(shell expr `id -u` % 5000 + 30999)
 
 FWDPORT1 = $(shell expr `id -u` % 5000 + 25999)
 FWDPORT2 = $(shell expr `id -u` % 5000 + 30999)
