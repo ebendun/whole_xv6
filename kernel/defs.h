@@ -95,6 +95,8 @@ void            proc_freepagetable(pagetable_t, uint64);
 int             kkill(int);
 int             killed(struct proc*);
 void            setkilled(struct proc*);
+int             proc_munmap(struct proc *, uint64, uint64);
+void            proc_munmapall(struct proc *);
 struct cpu*     mycpu(void);
 struct proc*    myproc();
 void            procinit(void);
