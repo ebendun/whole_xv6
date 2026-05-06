@@ -83,6 +83,17 @@ enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
 struct usyscall;
 
+struct vma {
+  int used;
+  uint64 addr;
+  uint64 len;
+  uint64 filelen;
+  int prot;
+  int flags;
+  uint64 offset;
+  struct file *f;
+};
+
 // Per-process state
 struct proc {
   struct spinlock lock;
@@ -115,4 +126,6 @@ struct proc {
   int interpose_mask;          // Bit mask of blocked syscalls
   char interpose_path[MAXPATH];// Allowed path for masked open/exec
   struct cpu *pincpu;
+  uint64 mmap_base;            // next mmap allocation address (grows down)
+  struct vma vmas[NVMA];
 };

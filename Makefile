@@ -113,6 +113,15 @@ CFLAGS += -DKCSAN
 KCSANFLAG = -fsanitize=thread -fno-inline
 endif
 
+ifeq ($(LAB),net)
+CFLAGS += -DNET_TESTS_PORT=$(SERVERPORT)
+endif
+
+ifdef KCSAN
+CFLAGS += -DKCSAN
+KCSANFLAG = -fsanitize=thread -fno-inline
+endif
+
 # Disable PIE when possible (for Ubuntu 16.10 toolchain)
 ifneq ($(shell $(CC) -dumpspecs 2>/dev/null | grep -e '[^f]no-pie'),)
 CFLAGS += -fno-pie -no-pie
@@ -202,6 +211,7 @@ UPROGS=\
 	$U/_stats\
 	$U/_kalloctest\
 	$U/_bcachetest\
+	$U/_mmaptest\
 
 $U/uthread_switch.o : $U/uthread_switch.S
 	$(CC) $(CFLAGS) -c -o $U/uthread_switch.o $U/uthread_switch.S
@@ -215,18 +225,6 @@ ph: notxv6/ph.c
 
 barrier: notxv6/barrier.c
 	gcc -o barrier -g -O2 $(XCFLAGS) notxv6/barrier.c -pthread
-
-
-ifeq ($(LAB),fs)
-UPROGS += \
-	$U/_bigfile
-endif
-
-ifeq ($(LAB),mmap)
-UPROGS += \
-	$U/_mmaptest
-endif
-
 
 UEXTRA += user/findtest.sh
 UEXTRA += user/sixfive.txt
@@ -254,9 +252,8 @@ GDBPORT = $(shell expr `id -u` % 5000 + 25000)
 QEMUGDB = $(shell if $(QEMU) -help | grep -q '^-gdb'; \
 	then echo "-gdb tcp::$(GDBPORT)"; \
 	else echo "-s -p $(GDBPORT)"; fi)
-ifndef CPUS
+
 CPUS := 3
-endif
 
 FWDPORT1 = $(shell expr `id -u` % 5000 + 25999)
 FWDPORT2 = $(shell expr `id -u` % 5000 + 30999)
@@ -267,7 +264,6 @@ QEMUOPTS += -drive file=fs.img,if=none,format=raw,id=x0
 QEMUOPTS += -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
 QEMUOPTS += -netdev user,id=net0,hostfwd=udp::$(FWDPORT1)-:2000,hostfwd=udp::$(FWDPORT2)-:2001 -object filter-dump,id=net0,netdev=net0,file=packets.pcap
 QEMUOPTS += -device e1000,netdev=net0,bus=pcie.0
-
 
 # makes a new fs.img
 qemu: check-qemu-version newfs.img $K/kernel fs.img

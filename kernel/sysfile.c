@@ -6,6 +6,7 @@
 
 #include "types.h"
 #include "riscv.h"
+#include "memlayout.h"
 #include "defs.h"
 #include "param.h"
 #include "stat.h"
@@ -104,6 +105,77 @@ sys_close(void)
     return -1;
   myproc()->ofile[fd] = 0;
   fileclose(f);
+  return 0;
+}
+
+uint64
+sys_mmap(void)
+{
+  uint64 addr;
+  uint64 len;
+  int prot, flags, offset;
+  struct file *f;
+  struct proc *p = myproc();
+
+  argaddr(0, &addr);
+  argaddr(1, &len);
+  argint(2, &prot);
+  argint(3, &flags);
+  argint(5, &offset);
+
+  if(addr != 0 || len == 0 || offset != 0)
+    return -1;
+  if(argfd(4, 0, &f) < 0)
+    return -1;
+  if((flags != MAP_SHARED && flags != MAP_PRIVATE) || f->type != FD_INODE)
+    return -1;
+  if((prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) == 0)
+    return -1;
+  if((prot & PROT_READ) && f->readable == 0)
+    return -1;
+  if((flags & MAP_SHARED) && (prot & PROT_WRITE) && f->writable == 0)
+    return -1;
+
+  int slot = -1;
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used == 0){
+      slot = i;
+      break;
+    }
+  }
+  if(slot < 0)
+    return -1;
+
+  uint64 maplen = PGROUNDUP(len);
+  uint64 mapaddr = PGROUNDDOWN(p->mmap_base - maplen);
+  if(mapaddr < p->sz || mapaddr + maplen > USYSCALL)
+    return -1;
+  ilock(f->ip);
+  uint64 filelen = f->ip->size;
+  iunlock(f->ip);
+
+  p->mmap_base = mapaddr;
+  p->vmas[slot].used = 1;
+  p->vmas[slot].addr = mapaddr;
+  p->vmas[slot].len = maplen;
+  p->vmas[slot].filelen = filelen;
+  p->vmas[slot].prot = prot;
+  p->vmas[slot].flags = flags;
+  p->vmas[slot].offset = 0;
+  p->vmas[slot].f = filedup(f);
+
+  return mapaddr;
+}
+
+uint64
+sys_munmap(void)
+{
+  uint64 addr, len;
+  argaddr(0, &addr);
+  argaddr(1, &len);
+
+  if(proc_munmap(myproc(), addr, len) < 0)
+    return -1;
   return 0;
 }
 

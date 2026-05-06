@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "fcntl.h"
+#include "fs.h"
+#include "sleeplock.h"
+#include "file.h"
 
 struct cpu cpus[NCPU];
 
@@ -17,6 +21,7 @@ struct spinlock pid_lock;
 
 extern void forkret(void);
 static void freeproc(struct proc *p);
+static int vmawriteback(struct proc *p, struct vma *v, uint64 addr, uint64 len);
 
 extern char trampoline[]; // trampoline.S
 
@@ -125,6 +130,8 @@ found:
   p->state = USED;
   p->interpose_mask = 0;
   p->interpose_path[0] = 0;
+  p->mmap_base = USYSCALL;
+  memset(p->vmas, 0, sizeof(p->vmas));
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -195,7 +202,109 @@ freeproc(struct proc *p)
   p->alarm_ticks = 0;
   p->alarm_handler = 0;
   p->alarm_inflight = 0;
+  p->mmap_base = 0;
+  memset(p->vmas, 0, sizeof(p->vmas));
   p->state = UNUSED;
+}
+
+static int
+vmawriteback(struct proc *p, struct vma *v, uint64 addr, uint64 len)
+{
+  if((v->flags & MAP_SHARED) == 0 || (v->prot & PROT_WRITE) == 0)
+    return 0;
+
+  int max = ((MAXOPBLOCKS-1-1-2) / 2) * BSIZE;
+  for(uint64 a = addr; a < addr + len; a += PGSIZE){
+    pte_t *pte = walk(p->pagetable, a, 0);
+    if(pte == 0 || (*pte & PTE_V) == 0)
+      continue;
+
+    uint64 pageoff = a - v->addr;
+    if(pageoff >= v->len || pageoff >= v->filelen)
+      continue;
+    uint64 nleft = v->filelen - pageoff;
+    if(nleft > PGSIZE)
+      nleft = PGSIZE;
+
+    char *src = (char*)PTE2PA(*pte);
+    uint64 foff = v->offset + pageoff;
+    uint64 done = 0;
+
+    while(done < nleft){
+      int n1 = nleft - done;
+      if(n1 > max)
+        n1 = max;
+
+      begin_op();
+      ilock(v->f->ip);
+      int r = writei(v->f->ip, 0, (uint64)(src + done), foff + done, n1);
+      iunlock(v->f->ip);
+      end_op();
+      if(r != n1)
+        return -1;
+      done += n1;
+    }
+  }
+
+  return 0;
+}
+
+int
+proc_munmap(struct proc *p, uint64 addr, uint64 len)
+{
+  if(len == 0 || (addr % PGSIZE) != 0 || (len % PGSIZE) != 0)
+    return -1;
+
+  struct vma *v = 0;
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used == 0)
+      continue;
+    uint64 start = p->vmas[i].addr;
+    uint64 end = start + p->vmas[i].len;
+    if(addr >= start && addr < end && addr + len <= end){
+      v = &p->vmas[i];
+      break;
+    }
+  }
+  if(v == 0)
+    return -1;
+
+  uint64 vend = v->addr + v->len;
+  if(addr != v->addr && addr + len != vend)
+    return -1;
+
+  if(vmawriteback(p, v, addr, len) < 0)
+    return -1;
+
+  uvmunmap(p->pagetable, addr, len / PGSIZE, 1);
+
+  if(addr == v->addr && addr + len == vend){
+    fileclose(v->f);
+    memset(v, 0, sizeof(*v));
+  } else if(addr == v->addr){
+    v->addr += len;
+    v->offset += len;
+    v->len -= len;
+    if(v->filelen > len)
+      v->filelen -= len;
+    else
+      v->filelen = 0;
+  } else {
+    v->len -= len;
+    if(v->filelen > v->len)
+      v->filelen = v->len;
+  }
+  return 0;
+}
+
+void
+proc_munmapall(struct proc *p)
+{
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used == 0)
+      continue;
+    proc_munmap(p, p->vmas[i].addr, PGROUNDUP(p->vmas[i].len));
+  }
 }
 
 // Create a user page table for a given process, with no user memory,
@@ -323,6 +432,12 @@ kfork(void)
   np->cwd = idup(p->cwd);
   np->interpose_mask = p->interpose_mask;
   safestrcpy(np->interpose_path, p->interpose_path, sizeof(np->interpose_path));
+  np->mmap_base = p->mmap_base;
+  for(i = 0; i < NVMA; i++){
+    np->vmas[i] = p->vmas[i];
+    if(np->vmas[i].used)
+      filedup(np->vmas[i].f);
+  }
 
   safestrcpy(np->name, p->name, sizeof(p->name));
 
@@ -367,6 +482,8 @@ kexit(int status)
 
   if(p == initproc)
     panic("init exiting");
+
+  proc_munmapall(p);
 
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
@@ -503,9 +620,7 @@ scheduler(void)
     if(nproc <= 2) {   // only init and sh exist
       // nothing to run; stop running on this core until an interrupt.
       intr_on();
-#ifndef LAB_FS
       asm volatile("wfi");
-#endif
     }
   }
 }
@@ -736,5 +851,4 @@ procdump(void)
     printf("\n");
   }
 }
-
 

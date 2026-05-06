@@ -52,3 +52,5 @@ entry("unbind");
 entry("send");
 entry("recv");
 entry("cpupin");
+entry("mmap");
+entry("munmap");

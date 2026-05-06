@@ -82,6 +82,20 @@ argstr(int n, char *buf, int max)
   return fetchstr(addr, buf, max);
 }
 
+static int
+interpose_allow_path(struct proc *p, int num)
+{
+  char path[MAXPATH];
+
+  if(num != SYS_open && num != SYS_exec)
+    return 0;
+  if(p->interpose_path[0] == 0)
+    return 0;
+  if(argstr(0, path, MAXPATH) < 0)
+    return 0;
+  return strncmp(path, p->interpose_path, MAXPATH) == 0;
+}
+
 // Prototypes for the functions that handle system calls.
 extern uint64 sys_fork(void);
 extern uint64 sys_exit(void);
@@ -114,20 +128,8 @@ extern uint64 sys_unbind(void);
 extern uint64 sys_send(void);
 extern uint64 sys_recv(void);
 extern uint64 sys_cpupin(void);
-
-static int
-interpose_allow_path(struct proc *p, int num)
-{
-  char path[MAXPATH];
-
-  if(num != SYS_open && num != SYS_exec)
-    return 0;
-  if(p->interpose_path[0] == 0)
-    return 0;
-  if(argstr(0, path, MAXPATH) < 0)
-    return 0;
-  return strncmp(path, p->interpose_path, MAXPATH) == 0;
-}
+extern uint64 sys_mmap(void);
+extern uint64 sys_munmap(void);
 
 
 // An array mapping syscall numbers from syscall.h
@@ -164,6 +166,8 @@ static uint64 (*syscalls[])(void) = {
 [SYS_send] sys_send,
 [SYS_recv] sys_recv,
 [SYS_cpupin] sys_cpupin,
+[SYS_mmap]    sys_mmap,
+[SYS_munmap]  sys_munmap,
 };
 
 

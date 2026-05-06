@@ -1,7 +1,5 @@
-#ifdef LAB_MMAP
-gtypedef unsigned long size_t;
+typedef unsigned long size_t;
 typedef long int off_t;
-#endif
 struct buf;
 struct context;
 struct file;
@@ -100,6 +98,8 @@ void            proc_freepagetable(pagetable_t, uint64);
 int             kkill(int);
 int             killed(struct proc*);
 void            setkilled(struct proc*);
+int             proc_munmap(struct proc *, uint64, uint64);
+void            proc_munmapall(struct proc *);
 struct cpu*     mycpu(void);
 struct proc*    myproc();
 void            procinit(void);
