@@ -13,5 +13,5 @@
 #define MAXPATH      128   // maximum file path name
 #define USERSTACK    2     // user stack pages
 #define NVMA 16            // user vma
-
+#define SUPERPGNUM 16       // the num of super page
 

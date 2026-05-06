@@ -34,8 +34,8 @@ struct {
 
 static uint64 super_start;
 static uint64 super_end;
-static uint refcnt[PHYSTOP / PGSIZE];
-static uint super_refcnt[PHYSTOP / SUPERPGSIZE];
+static uint refcnt[(PHYSTOP - SUPERPGNUM * SUPERPGSIZE) / PGSIZE];
+static uint super_refcnt[SUPERPGNUM];
 
 static inline uint
 pa2ref(uint64 pa)
@@ -54,7 +54,7 @@ kinit()
 {
   initlock(&supermem.lock, "supermem");
   super_end = PHYSTOP;
-  super_start = PHYSTOP - 16 * SUPERPGSIZE;
+  super_start = PHYSTOP - SUPERPGNUM * SUPERPGSIZE;
   super_start = SUPERPGROUNDDOWN(super_start);
 
   for(char *p = (char*)super_start; p + SUPERPGSIZE <= (char*)super_end; p += SUPERPGSIZE)
@@ -105,7 +105,7 @@ kfree(void *pa)
   push_off();
   int cpu_id = cpuid();
   pop_off();
-  if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
+  if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= super_start)
     panic("kfree");
 
   acquire(&kmem[cpu_id].lock);
@@ -187,7 +187,6 @@ kalloc(void)
 {
   struct run *r;
 
-  
   push_off();
   int cpu_id = cpuid();
   pop_off();
@@ -242,7 +241,7 @@ kalloc(void)
 void
 kref_inc(uint64 pa)
 {
-  if((pa % PGSIZE) != 0 || pa >= PHYSTOP)
+  if((pa % PGSIZE) != 0 || pa >= super_start)
     panic("kref_inc");
   push_off();
   int cpu_id = cpuid();
@@ -256,7 +255,7 @@ uint
 kref_get(uint64 pa)
 {
   uint n;
-  if((pa % PGSIZE) != 0 || pa >= PHYSTOP)
+  if((pa % PGSIZE) != 0 || pa >= super_start)
     panic("kref_get");
 
   push_off();

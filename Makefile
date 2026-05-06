@@ -85,7 +85,6 @@ LD = $(TOOLPREFIX)ld
 OBJCOPY = $(TOOLPREFIX)objcopy
 OBJDUMP = $(TOOLPREFIX)objdump
 
-CFLAGS = -Wall -Werror -O -fno-omit-frame-pointer -ggdb -gdwarf-2
 CFLAGS = -Wall -Werror -Wno-unknown-attributes -O -fno-omit-frame-pointer -ggdb -gdwarf-2
 
 ifdef LAB
@@ -212,6 +211,7 @@ UPROGS=\
 	$U/_kalloctest\
 	$U/_bcachetest\
 	$U/_mmaptest\
+	$U/_memdump\
 
 $U/uthread_switch.o : $U/uthread_switch.S
 	$(CC) $(CFLAGS) -c -o $U/uthread_switch.o $U/uthread_switch.S
@@ -228,7 +228,6 @@ barrier: notxv6/barrier.c
 
 UEXTRA += user/findtest.sh
 UEXTRA += user/sixfive.txt
-UPROGS += $U/_memdump
 
 fs.img: mkfs/mkfs README $(UEXTRA) $(UPROGS)
 	mkfs/mkfs fs.img README $(UEXTRA) $(UPROGS)

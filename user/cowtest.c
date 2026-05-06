@@ -5,7 +5,8 @@
 #include "kernel/types.h"
 #include "kernel/memlayout.h"
 #include "user/user.h"
-
+#include "kernel/param.h"
+#include "kernel/riscv.h"
 // allocate more than half of physical memory,
 // then fork. this will fail in the default
 // kernel, which does not support copy-on-write.
@@ -53,7 +54,7 @@ simpletest()
 void
 threetest()
 {
-  uint64 phys_size = PHYSTOP - KERNBASE;
+  uint64 phys_size = PHYSTOP - SUPERPGNUM * SUPERPGSIZE - KERNBASE;
   int sz = phys_size / 4;
   int pid1, pid2;
 
