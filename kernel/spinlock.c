@@ -113,23 +113,21 @@ release(struct spinlock *lk)
 static void
 read_acquire_inner(struct rwspinlock *rwlk)
 {
-  // Replace this with your implementation.
   acquire(&rwlk->l);
   for(;;){
-    acquire(&rwlk->l);
     if(rwlk->writer_flag == 0 && rwlk->waiting_writers == 0){
       rwlk->nreader += 1;
       release(&rwlk->l);
       return;
     }
     release(&rwlk->l);
+    acquire(&rwlk->l);
   }
 }
 
 static void
 read_release_inner(struct rwspinlock *rwlk)
 {
-  // Replace this with your implementation.
   acquire(&rwlk->l);
   if(rwlk->nreader < 1)
     panic("read_release_inner");
@@ -141,7 +139,6 @@ read_release_inner(struct rwspinlock *rwlk)
 static void
 write_acquire_inner(struct rwspinlock *rwlk)
 {
-  // Replace this with your implementation.
   acquire(&rwlk->l);
   rwlk->waiting_writers += 1;
   while(rwlk->writer_flag || rwlk->nreader){

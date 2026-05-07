@@ -74,16 +74,16 @@ sys_pause(void)
   //backtrace();
   if(n < 0)
     n = 0;
-  acquire(&tickslock);
+  acquire(&tickslock.l);
   ticks0 = ticks;
   while(ticks - ticks0 < n){
     if(killed(myproc())){
-      release(&tickslock);
+      release(&tickslock.l);
       return -1;
     }
-    sleep(&ticks, &tickslock);
+    sleep(&ticks, &tickslock.l);
   }
-  release(&tickslock);
+  release(&tickslock.l);
   return 0;
 }
 
@@ -158,9 +158,9 @@ sys_uptime(void)
 {
   uint xticks;
 
-  acquire(&tickslock);
+  read_acquire(&tickslock);
   xticks = ticks;
-  release(&tickslock);
+  read_release(&tickslock);
   return xticks;
 }
 
@@ -181,6 +181,7 @@ sys_interpose(void)
   p->interpose_mask = mask;
   return 0;
 }
+
 uint64
 sys_cpupin(void)
 {

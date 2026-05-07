@@ -126,6 +126,7 @@ void            push_off(void);
 void            pop_off(void);
 int             atomic_read4(int *addr);
 void            freelock(struct spinlock*);
+void            initrwlock(struct rwspinlock *rwlk);
 void            read_acquire(struct rwspinlock*);
 void            read_release(struct rwspinlock*);
 void            write_acquire(struct rwspinlock*);
@@ -158,7 +159,7 @@ void            syscall();
 extern uint     ticks;
 void            trapinit(void);
 void            trapinithart(void);
-extern struct spinlock tickslock;
+extern struct rwspinlock tickslock;
 void            prepare_return(void);
 
 // uart.c
