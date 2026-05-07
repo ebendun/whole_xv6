@@ -202,8 +202,6 @@ walkaddr(pagetable_t pagetable, uint64 va)
   pa = PTE2PA(*pte);
   if(level == 1)
     pa += va & (SUPERPGSIZE - 1);
-  else if(level == 2)
-    pa += va & ((1L << 30) - 1);
   else
     pa += va & (PGSIZE - 1);
 
@@ -332,7 +330,7 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
       }
       // Demote superpage to 4K pages for partial unmap.
       uint64 super_pa = PTE2PA(*pte);
-      pagetable_t newpt = (pagetable_t)kalloc();
+      pagetable_t newpt = uvmcreate();
       if(newpt == 0)
         panic("uvmunmap: demote alloc");
       memset(newpt, 0, PGSIZE);
@@ -342,7 +340,7 @@ uvmunmap(pagetable_t pagetable, uint64 va, uint64 npages, int do_free)
         if(mem == 0)
           panic("uvmunmap: demote page");
         memmove(mem, (void*)(super_pa + i * PGSIZE), PGSIZE);
-        newpt[i] = PA2PTE(mem) | (flags & ~PTE_V) | PTE_V;
+        newpt[i] = PA2PTE(mem) | (flags | PTE_V);
       }
       superfree((void*)super_pa);
       *pte = PA2PTE(newpt) | PTE_V;
@@ -678,9 +676,6 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
     return -1;
   }
 }
-
-
-
 
 // allocate and map user memory if process is referencing a page
 // that was lazily allocated in sys_sbrk().

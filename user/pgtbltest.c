@@ -111,7 +111,8 @@ supercheck(char *end)
     if ((uint64) last_pte != 0 && pte != last_pte) {
         err("pte different");
     }
-    if((pte & PTE_V) == 0 || (pte & PTE_R) == 0 || (pte & PTE_W) == 0){
+    if((pte & PTE_V) == 0 || (pte & PTE_R) == 0 ||
+       (((pte & PTE_W) == 0) && ((pte & PTE_COW) == 0))){
       err("pte wrong");
     }
     last_pte = pte;
