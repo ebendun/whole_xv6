@@ -255,13 +255,8 @@ void
 virtio_disk_rw(struct buf *b, int write)
 {
   uint64 sector = b->blockno * (BSIZE / 512);
-  static int rw_once = 0;
 
   acquire(&disk.vdisk_lock);
-
-  if(rw_once == 0){
-    rw_once = 1;
-  }
 
   checkbuf(b);
 
@@ -331,10 +326,6 @@ virtio_disk_rw(struct buf *b, int write)
     sleep(b, &disk.vdisk_lock);
   }
 
-  if(rw_once == 1){
-    rw_once = 2;
-  }
-
   disk.info[idx[0]].b = 0;
   free_chain(idx[0]);
 
@@ -344,12 +335,7 @@ virtio_disk_rw(struct buf *b, int write)
 void
 virtio_disk_intr()
 {
-  static int intr_once = 0;
-  if(intr_once == 0){
-    intr_once = 1;
-  }
   acquire(&disk.vdisk_lock);
-
 
   // the device won't raise another interrupt until we tell it
   // we've seen this interrupt, which the following line does.
