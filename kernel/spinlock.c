@@ -14,6 +14,16 @@ static struct spinlock *locks[NLOCK];
 struct spinlock lock_locks;
 
 void
+spinlockinit(void)
+{
+  lock_locks.name = "lock_locks";
+  lock_locks.locked = 0;
+  lock_locks.cpu = 0;
+  lock_locks.nts = 0;
+  lock_locks.n = 0;
+}
+
+void
 freelock(struct spinlock *lk)
 {
   acquire(&lock_locks);

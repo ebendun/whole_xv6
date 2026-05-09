@@ -53,12 +53,12 @@ void
 kinit()
 {
   initlock(&supermem.lock, "supermem");
-  super_end = PHYSTOP;
   super_start = PHYSTOP - SUPERPGNUM * SUPERPGSIZE;
   super_start = SUPERPGROUNDDOWN(super_start);
+  super_end = super_start + SUPERPGNUM * SUPERPGSIZE;
 
-  for(char *p = (char*)super_start; p + SUPERPGSIZE <= (char*)super_end; p += SUPERPGSIZE)
-  {
+  for(int i = 0; i < SUPERPGNUM; i++){
+    char *p = (char*)(super_start + (uint64)i * SUPERPGSIZE);
     acquire(&supermem.lock);
     super_refcnt[pa2super((uint64)p)] = 1;
     release(&supermem.lock);

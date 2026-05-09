@@ -10,19 +10,23 @@ volatile static int started = 0;
 void
 main()
 {
-  if(cpuid() == 0){
+  if(__sync_bool_compare_and_swap(&started, 0, 1)){
     consoleinit();
     statsinit();
     printfinit();
     printf("\n");
     printf("xv6 kernel is booting\n");
     printf("\n");
+    spinlockinit();  // bootstrap lock table
     kinit();         // physical page allocator
     kvminit();       // create kernel page table
     kvminithart();   // turn on paging
     procinit();      // process table
     trapinit();      // trap vectors
     trapinithart();  // install kernel trap vector
+    w_sie(r_sie() | SIE_SEIE | SIE_STIE);
+    timerinit();
+    intr_on();
     plicinit();      // set up interrupt controller
     plicinithart();  // ask PLIC for device interrupts
     binit();         // buffer cache
@@ -32,6 +36,7 @@ main()
     pci_init();
     netinit();
     userinit();      // first user process
+    start_other_harts();
 #ifdef KCSAN
     kcsaninit();
 #endif
@@ -44,6 +49,9 @@ main()
     printf("hart %d starting\n", cpuid());
     kvminithart();    // turn on paging
     trapinithart();   // install kernel trap vector
+    w_sie(r_sie() | SIE_SEIE | SIE_STIE);
+    timerinit();
+    intr_on();
     plicinithart();   // ask PLIC for device interrupts
   }
   scheduler();        

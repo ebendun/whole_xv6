@@ -126,6 +126,7 @@ void            push_off(void);
 void            pop_off(void);
 int             atomic_read4(int *addr);
 void            freelock(struct spinlock*);
+void            spinlockinit(void);
 void            initrwlock(struct rwspinlock *rwlk);
 void            read_acquire(struct rwspinlock*);
 void            read_release(struct rwspinlock*);
@@ -161,6 +162,10 @@ void            trapinit(void);
 void            trapinithart(void);
 extern struct rwspinlock tickslock;
 void            prepare_return(void);
+
+// start.c
+void            timerinit(void);
+void            start_other_harts(void);
 
 // uart.c
 void            uartinit(void);

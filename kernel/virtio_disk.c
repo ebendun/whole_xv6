@@ -58,6 +58,12 @@ static struct disk {
   
 } disk;
 
+static inline uint64
+align_up(uint64 x, uint64 align)
+{
+  return (x + align - 1) & ~(align - 1);
+}
+
 void
 virtio_disk_init(void)
 {
@@ -65,10 +71,11 @@ virtio_disk_init(void)
 
   initlock(&disk.vdisk_lock, "virtio_disk");
 
-  if(*R(VIRTIO_MMIO_MAGIC_VALUE) != 0x74726976 ||
-     *R(VIRTIO_MMIO_VERSION) != 2 ||
-     *R(VIRTIO_MMIO_DEVICE_ID) != 2 ||
-     *R(VIRTIO_MMIO_VENDOR_ID) != 0x554d4551){
+  uint32 magic = *R(VIRTIO_MMIO_MAGIC_VALUE);
+  uint32 version = *R(VIRTIO_MMIO_VERSION);
+  uint32 device_id = *R(VIRTIO_MMIO_DEVICE_ID);
+  uint32 vendor = *R(VIRTIO_MMIO_VENDOR_ID);
+  if(magic != 0x74726976 || (version != 1 && version != 2) || device_id != 2 || vendor != 0x554d4551){
     panic("could not find virtio disk");
   }
   
@@ -106,10 +113,6 @@ virtio_disk_init(void)
   // initialize queue 0.
   *R(VIRTIO_MMIO_QUEUE_SEL) = 0;
 
-  // ensure queue 0 is not in use.
-  if(*R(VIRTIO_MMIO_QUEUE_READY))
-    panic("virtio disk should not be ready");
-
   // check maximum queue size.
   uint32 max = *R(VIRTIO_MMIO_QUEUE_NUM_MAX);
   if(max == 0)
@@ -117,29 +120,45 @@ virtio_disk_init(void)
   if(max < NUM)
     panic("virtio disk max queue too short");
 
-  // allocate and zero queue memory.
-  disk.desc = kalloc();
-  disk.avail = kalloc();
-  disk.used = kalloc();
-  if(!disk.desc || !disk.avail || !disk.used)
-    panic("virtio disk kalloc");
-  memset(disk.desc, 0, PGSIZE);
-  memset(disk.avail, 0, PGSIZE);
-  memset(disk.used, 0, PGSIZE);
-
   // set queue size.
   *R(VIRTIO_MMIO_QUEUE_NUM) = NUM;
 
-  // write physical addresses.
-  *R(VIRTIO_MMIO_QUEUE_DESC_LOW) = (uint64)disk.desc;
-  *R(VIRTIO_MMIO_QUEUE_DESC_HIGH) = (uint64)disk.desc >> 32;
-  *R(VIRTIO_MMIO_DRIVER_DESC_LOW) = (uint64)disk.avail;
-  *R(VIRTIO_MMIO_DRIVER_DESC_HIGH) = (uint64)disk.avail >> 32;
-  *R(VIRTIO_MMIO_DEVICE_DESC_LOW) = (uint64)disk.used;
-  *R(VIRTIO_MMIO_DEVICE_DESC_HIGH) = (uint64)disk.used >> 32;
+  if(version == 1){
+    // legacy (version 1) expects used ring to be aligned to QUEUE_ALIGN.
+    // Allocate a superpage to guarantee enough contiguous space.
+    disk.desc = superalloc();
+    if(!disk.desc)
+      panic("virtio disk superalloc");
+    memset(disk.desc, 0, SUPERPGSIZE);
+    disk.avail = (struct virtq_avail *)((char*)disk.desc + NUM*sizeof(struct virtq_desc));
+    disk.used = (struct virtq_used *)((char*)disk.desc + PGSIZE);
 
-  // queue is ready.
-  *R(VIRTIO_MMIO_QUEUE_READY) = 0x1;
+    // write alignment and PFN of the page.
+    *R(VIRTIO_MMIO_GUEST_PAGE_SIZE) = PGSIZE;
+    *R(VIRTIO_MMIO_QUEUE_ALIGN) = PGSIZE;
+    *R(VIRTIO_MMIO_QUEUE_PFN) = ((uint64)disk.desc) >> PGSHIFT;
+  } else {
+    // modern (version 2) uses separate pages.
+    disk.desc = kalloc();
+    disk.avail = kalloc();
+    disk.used = kalloc();
+    if(!disk.desc || !disk.avail || !disk.used)
+      panic("virtio disk kalloc");
+    memset(disk.desc, 0, PGSIZE);
+    memset(disk.avail, 0, PGSIZE);
+    memset(disk.used, 0, PGSIZE);
+
+    // write physical addresses.
+    *R(VIRTIO_MMIO_QUEUE_DESC_LOW) = (uint64)disk.desc;
+    *R(VIRTIO_MMIO_QUEUE_DESC_HIGH) = (uint64)disk.desc >> 32;
+    *R(VIRTIO_MMIO_DRIVER_DESC_LOW) = (uint64)disk.avail;
+    *R(VIRTIO_MMIO_DRIVER_DESC_HIGH) = (uint64)disk.avail >> 32;
+    *R(VIRTIO_MMIO_DEVICE_DESC_LOW) = (uint64)disk.used;
+    *R(VIRTIO_MMIO_DEVICE_DESC_HIGH) = (uint64)disk.used >> 32;
+
+    // queue is ready.
+    *R(VIRTIO_MMIO_QUEUE_READY) = 0x1;
+  }
 
   // all NUM descriptors start out unused.
   for(int i = 0; i < NUM; i++)
@@ -236,8 +255,13 @@ void
 virtio_disk_rw(struct buf *b, int write)
 {
   uint64 sector = b->blockno * (BSIZE / 512);
+  static int rw_once = 0;
 
   acquire(&disk.vdisk_lock);
+
+  if(rw_once == 0){
+    rw_once = 1;
+  }
 
   checkbuf(b);
 
@@ -307,6 +331,10 @@ virtio_disk_rw(struct buf *b, int write)
     sleep(b, &disk.vdisk_lock);
   }
 
+  if(rw_once == 1){
+    rw_once = 2;
+  }
+
   disk.info[idx[0]].b = 0;
   free_chain(idx[0]);
 
@@ -316,7 +344,12 @@ virtio_disk_rw(struct buf *b, int write)
 void
 virtio_disk_intr()
 {
+  static int intr_once = 0;
+  if(intr_once == 0){
+    intr_once = 1;
+  }
   acquire(&disk.vdisk_lock);
+
 
   // the device won't raise another interrupt until we tell it
   // we've seen this interrupt, which the following line does.
