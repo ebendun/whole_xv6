@@ -676,7 +676,7 @@ namex(char *path, int nameiparent, char *name)
   struct inode *ip, *next;
 
   if(*path == '/')
-    ip = iget(ROOTDEV, ROOTINO);
+    ip = iget(SECONDDEV, ROOTINO);
   else
     ip = idup(myproc()->cwd);
 

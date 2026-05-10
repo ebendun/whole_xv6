@@ -23,6 +23,8 @@ struct {
   struct run *freelist;
 } kmem[NCPU];
 
+static struct spinlock ref_lock;
+
 struct superrun {
   struct superrun *next;
 };
@@ -52,6 +54,7 @@ pa2super(uint64 pa)
 void
 kinit()
 {
+  initlock(&ref_lock, "refcnt");
   initlock(&supermem.lock, "supermem");
   super_start = PHYSTOP - SUPERPGNUM * SUPERPGSIZE;
   super_start = SUPERPGROUNDDOWN(super_start);
@@ -79,15 +82,12 @@ kinit()
 void
 freerange(void *pa_start, void *pa_end)
 {
-  push_off();
-  int cpu_id = cpuid();
-  pop_off();
   char *p;
   p = (char*)PGROUNDUP((uint64)pa_start);
   for(; p + PGSIZE <= (char*)pa_end; p += PGSIZE){
-    acquire(&kmem[cpu_id].lock);
+    acquire(&ref_lock);
     refcnt[pa2ref((uint64)p)] = 1;
-    release(&kmem[cpu_id].lock);
+    release(&ref_lock);
     kfree(p);
   }
 }
@@ -108,13 +108,13 @@ kfree(void *pa)
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= super_start)
     panic("kfree");
 
-  acquire(&kmem[cpu_id].lock);
+  acquire(&ref_lock);
   if(refcnt[pa2ref((uint64)pa)] < 1)
     panic("kfree ref");
   refcnt[pa2ref((uint64)pa)]--;
   if(refcnt[pa2ref((uint64)pa)] == 0)
     freeit = 1;
-  release(&kmem[cpu_id].lock);
+  release(&ref_lock);
 
   if(!freeit)
     return;
@@ -195,8 +195,11 @@ kalloc(void)
   r = kmem[cpu_id].freelist;
   if(r)
   kmem[cpu_id].freelist = r->next;
-  if(r)
+  if(r){ 
+    acquire(&ref_lock);
     refcnt[pa2ref((uint64)r)] = 1;
+    release(&ref_lock); 
+  }
   release(&kmem[cpu_id].lock);
   if(r){
     memset((char*)r, 5, PGSIZE); // fill with junk
@@ -230,8 +233,11 @@ kalloc(void)
   r = kmem[cpu_id].freelist;
   if(r)
     kmem[cpu_id].freelist = r->next;
-  if(r)
-    refcnt[pa2ref((uint64)r)] = 1;
+  if(r){ 
+    acquire(&ref_lock); 
+    refcnt[pa2ref((uint64)r)] = 1; 
+    release(&ref_lock); 
+  }
   release(&kmem[cpu_id].lock);
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
@@ -243,12 +249,9 @@ kref_inc(uint64 pa)
 {
   if((pa % PGSIZE) != 0 || pa >= super_start)
     panic("kref_inc");
-  push_off();
-  int cpu_id = cpuid();
-  pop_off();
-  acquire(&kmem[cpu_id].lock);
+  acquire(&ref_lock);
   refcnt[pa2ref(pa)]++;
-  release(&kmem[cpu_id].lock);
+  release(&ref_lock);
 }
 
 uint
@@ -258,12 +261,9 @@ kref_get(uint64 pa)
   if((pa % PGSIZE) != 0 || pa >= super_start)
     panic("kref_get");
 
-  push_off();
-  int cpu_id = cpuid();
-  pop_off();
-  acquire(&kmem[cpu_id].lock);
+  acquire(&ref_lock);
   n = refcnt[pa2ref(pa)];
-  release(&kmem[cpu_id].lock);
+  release(&ref_lock);
   return n;
 }
 

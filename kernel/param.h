@@ -4,7 +4,8 @@
 #define NFILE       100  // open files per system
 #define NINODE       50  // maximum number of active i-nodes
 #define NDEV         10  // maximum major device number
-#define ROOTDEV       1  // device number of file system root disk
+#define FIRSTDEV      1  // xv6 ext4 device number of file system root disk
+#define SECONDDEV     2  // init xv6 fs device number of file system root disk
 #define MAXARG       32  // max exec arguments
 #define MAXOPBLOCKS  10  // max # of blocks any FS op writes
 #define LOGBLOCKS    (MAXOPBLOCKS*3)  // max data blocks in on-disk log

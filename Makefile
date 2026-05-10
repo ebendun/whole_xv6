@@ -258,10 +258,10 @@ FWDPORT1 = $(shell expr `id -u` % 5000 + 25999)
 FWDPORT2 = $(shell expr `id -u` % 5000 + 30999)
 
 QEMUOPTS = -machine virt -kernel $K/kernel -m 256M -smp $(CPUS) -nographic -bios default
-QEMUOPTS += -drive file=fs.img,if=none,format=raw,id=x0
+QEMUOPTS += -drive file=sdcard-rv.img,if=none,format=raw,id=x0
 QEMUOPTS += -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
 QEMUOPTS += -no-reboot -rtc base=utc
-QEMUOPTS += -drive file=sdcard-rv.img,if=none,format=raw,id=x1
+QEMUOPTS += -drive file=fs.img,if=none,format=raw,id=x1
 QEMUOPTS += -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
 QEMUOPTS += -device virtio-net-device,netdev=net -netdev user,id=net -rtc base=utc
 
