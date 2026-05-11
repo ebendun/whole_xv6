@@ -681,6 +681,10 @@ forkret(void)
     // be run from main().
     fsinit(SECONDDEV);
 
+    // Probe ext4 on FIRSTDEV here — must run in process context
+    // because `bread()` will sleep.
+    ext4_init();
+
     first = 0;
     // ensure other cores see first=0.
     __sync_synchronize();

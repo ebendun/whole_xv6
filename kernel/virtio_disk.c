@@ -84,10 +84,7 @@ virtio_disk_init(void)
     uint32 device_id = *(volatile uint32*)(base + VIRTIO_MMIO_DEVICE_ID);
     uint32 vendor = *(volatile uint32*)(base + VIRTIO_MMIO_VENDOR_ID);
     if(magic != 0x74726976 || (version != 1 && version != 2) || device_id != 2 || vendor != 0x554d4551){
-      // no virtio disk at this base
       panic("could not find virtio disk");
-      d->desc = 0;
-      continue;
     }
 
     // reset device
@@ -353,8 +350,7 @@ virtio_disk_intr()
   // handle interrupts for all initialized virtio devices
   for(int devidx = 0; devidx < VDISKS; devidx++){
     struct disk *d = &disks[devidx];
-    if(d->desc == 0)
-      continue;
+
     uint64 base = VIRTIO0 + devidx * VIRTIO_STEP;
 
     acquire(&d->vdisk_lock);
@@ -372,8 +368,14 @@ virtio_disk_intr()
         panic("virtio_disk_intr status");
 
       struct buf *b = d->info[id].b;
-      b->disk = 0;   // disk is done with buf
-      wakeup(b);
+      if(b){
+        b->disk = 0;   // disk is done with buf
+        wakeup(b);
+      } 
+      // else {
+      //   // wake up any waiter sleeping on the status word
+      //   wakeup(&d->info[id].status);
+      // }
 
       d->used_idx += 1;
     }

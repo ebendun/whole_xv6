@@ -31,6 +31,8 @@ OBJS = \
   $K/kernelvec.o \
   $K/plic.o \
   $K/virtio_disk.o\
+  $K/ext4.o \
+  $K/ext4_probe.o \
   $K/e1000.o \
   $K/net.o \
   $K/pci.o\
