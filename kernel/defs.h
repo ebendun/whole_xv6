@@ -213,6 +213,7 @@ void            ext4_init(void);
 int             ext4_read_super(int dev);
 void            ext4_list_root(int dev);
 int             ext4_read_file_by_path(int dev, const char *path, uchar *dst, uint32 len);
+void            ext4_print_sh_scripts(int dev);
 
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))

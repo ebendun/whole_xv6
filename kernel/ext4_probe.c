@@ -13,4 +13,5 @@ void ext4_init(void)
   }
   printf("ext4: detected ext4 on device %d\n", FIRSTDEV);
   ext4_list_root(FIRSTDEV);
+  ext4_print_sh_scripts(FIRSTDEV);
 }

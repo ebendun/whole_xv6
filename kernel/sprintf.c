@@ -52,8 +52,11 @@ snprintf(char *buf, unsigned long sz, const char *fmt, ...)
   int off = 0;
   char *s;
 
+  if(sz == 0)
+    return 0;
+
   va_start(ap, fmt);
-  for(i = 0; off < sz && (c = fmt[i] & 0xff) != 0; i++){
+  for(i = 0; off + 1 < sz && (c = fmt[i] & 0xff) != 0; i++){
     if(c != '%'){
       off += sputc(buf+off, c);
       continue;
@@ -63,15 +66,17 @@ snprintf(char *buf, unsigned long sz, const char *fmt, ...)
       break;
     switch(c){
     case 'd':
-      off += sprintint(buf+off, va_arg(ap, int), 10, 1);
+      if(off + 1 < sz)
+        off += sprintint(buf+off, va_arg(ap, int), 10, 1);
       break;
     case 'x':
-      off += sprintint(buf+off, va_arg(ap, int), 16, 1);
+      if(off + 1 < sz)
+        off += sprintint(buf+off, va_arg(ap, int), 16, 1);
       break;
     case 's':
       if((s = va_arg(ap, char*)) == 0)
         s = "(null)";
-      for(; *s && off < sz; s++)
+      for(; *s && off + 1 < sz; s++)
         off += sputc(buf+off, *s);
       break;
     case '%':
@@ -84,5 +89,7 @@ snprintf(char *buf, unsigned long sz, const char *fmt, ...)
       break;
     }
   }
+  buf[off] = '\0';
+  va_end(ap);
   return off;
 }
