@@ -54,6 +54,43 @@ void panic(char*);
 struct cmd *parsecmd(char*);
 void runcmd(struct cmd*) __attribute__((noreturn));
 
+int
+looks_elf(char *path)
+{
+  int fd;
+  char magic[4];
+
+  fd = open(path, O_RDONLY);
+  if(fd < 0)
+    return 0;
+  if(read(fd, magic, sizeof(magic)) != sizeof(magic)){
+    close(fd);
+    return 0;
+  }
+  close(fd);
+  return magic[0] == 0x7f && magic[1] == 'E' &&
+         magic[2] == 'L' && magic[3] == 'F';
+}
+
+void
+runline(char *buf)
+{
+  char *cmd = buf;
+  while (*cmd == ' ' || *cmd == '\t')
+    cmd++;
+  if (*cmd == '\n' || *cmd == 0 || *cmd == '#')
+    return;
+  if(cmd[0] == 'c' && cmd[1] == 'd' && cmd[2] == ' '){
+    cmd[strlen(cmd)-1] = 0;
+    if(chdir(cmd+3) < 0)
+      fprintf(2, "cannot cd %s\n", cmd+3);
+  } else {
+    if(fork1() == 0)
+      runcmd(parsecmd(cmd));
+    wait(0);
+  }
+}
+
 // Execute cmd.  Never returns.
 void
 runcmd(struct cmd *cmd)
@@ -77,6 +114,18 @@ runcmd(struct cmd *cmd)
     if(ecmd->argv[0] == 0)
       exit(1);
     exec(ecmd->argv[0], ecmd->argv);
+    if(looks_elf(ecmd->argv[0])){
+      fprintf(2, "exec %s failed\n", ecmd->argv[0]);
+      break;
+    }
+    char *sargv[MAXARGS];
+    int i;
+    sargv[0] = "sh";
+    sargv[1] = ecmd->argv[0];
+    for(i = 1; ecmd->argv[i] && i + 1 < MAXARGS - 1; i++)
+      sargv[i + 1] = ecmd->argv[i];
+    sargv[i + 1] = 0;
+    exec("sh", sargv);
     fprintf(2, "exec %s failed\n", ecmd->argv[0]);
     break;
 
@@ -143,10 +192,36 @@ getcmd(char *buf, int nbuf)
 }
 
 int
-main(void)
+main(int argc, char *argv[])
 {
   static char buf[100];
   int fd;
+  int n;
+  char c;
+
+  if(argc > 1){
+    if((fd = open(argv[1], O_RDONLY)) < 0){
+      fprintf(2, "sh: cannot open %s\n", argv[1]);
+      exit(1);
+    }
+    n = 0;
+    while(read(fd, &c, 1) == 1){
+      if(n < sizeof(buf) - 1)
+        buf[n++] = c;
+      if(c == '\n'){
+        buf[n] = 0;
+        runline(buf);
+        n = 0;
+      }
+    }
+    if(n > 0){
+      buf[n++] = '\n';
+      buf[n] = 0;
+      runline(buf);
+    }
+    close(fd);
+    exit(0);
+  }
 
   // Ensure that three file descriptors are open.
   while((fd = open("console", O_RDWR)) >= 0){
@@ -158,21 +233,7 @@ main(void)
 
   // Read and run input commands.
   while(getcmd(buf, sizeof(buf)) >= 0){
-    char *cmd = buf;
-    while (*cmd == ' ' || *cmd == '\t')
-      cmd++;
-    if (*cmd == '\n') // is a blank command
-      continue;
-    if(cmd[0] == 'c' && cmd[1] == 'd' && cmd[2] == ' '){
-      // Chdir must be called by the parent, not the child.
-      cmd[strlen(cmd)-1] = 0;  // chop \n
-      if(chdir(cmd+3) < 0)
-        fprintf(2, "cannot cd %s\n", cmd+3);
-    } else {
-      if(fork1() == 0)
-        runcmd(parsecmd(cmd));
-      wait(0);
-    }
+    runline(buf);
   }
   exit(0);
 }

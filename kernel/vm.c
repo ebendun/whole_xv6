@@ -794,13 +794,15 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
       return 0;
     }
 
-    uint64 off = v->offset + (a - v->addr);
-    ilock(v->f->ip);
-    int n = readi(v->f->ip, 0, mem, off, PGSIZE);
-    iunlock(v->f->ip);
-    if(n < 0){
-      kfree((void*)mem);
-      return 0;
+    if(v->f){
+      uint64 off = v->offset + (a - v->addr);
+      ilock(v->f->ip);
+      int n = readi(v->f->ip, 0, mem, off, PGSIZE);
+      iunlock(v->f->ip);
+      if(n < 0){
+        kfree((void*)mem);
+        return 0;
+      }
     }
 
     int perm = PTE_U;

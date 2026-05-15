@@ -104,6 +104,31 @@ pipewrite(struct pipe *pi, uint64 addr, int n)
 }
 
 int
+pipewrite_kernel(struct pipe *pi, char *buf, int n)
+{
+  int i = 0;
+  struct proc *pr = myproc();
+
+  acquire(&pi->lock);
+  while(i < n){
+    if(pi->readopen == 0 || killed(pr)){
+      release(&pi->lock);
+      return -1;
+    }
+    if(pi->nwrite == pi->nread + PIPESIZE){
+      wakeup(&pi->nread);
+      sleep(&pi->nwrite, &pi->lock);
+    } else {
+      pi->data[pi->nwrite++ % PIPESIZE] = buf[i++];
+    }
+  }
+  wakeup(&pi->nread);
+  release(&pi->lock);
+
+  return i;
+}
+
+int
 piperead(struct pipe *pi, uint64 addr, int n)
 {
   int i;

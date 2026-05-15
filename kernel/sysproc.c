@@ -32,11 +32,37 @@ sys_fork(void)
 }
 
 uint64
+sys_linux_clone(void)
+{
+  uint64 flags, stack;
+  int pid;
+
+  argaddr(0, &flags);
+  argaddr(1, &stack);
+  (void)flags;
+  (void)stack;
+
+  pid = kfork();
+  return pid;
+}
+
+uint64
 sys_wait(void)
 {
   uint64 p;
   argaddr(0, &p);
   return kwait(p);
+}
+
+uint64
+sys_linux_wait4(void)
+{
+  int options;
+  uint64 status;
+
+  argint(2, &options);
+  argaddr(1, &status);
+  return kwait_options(status, options);
 }
 
 uint64
@@ -63,6 +89,114 @@ sys_sbrk(void)
     myproc()->sz += n;
   }
   return addr;
+}
+
+uint64
+sys_linux_brk(void)
+{
+  uint64 addr;
+  struct proc *p = myproc();
+
+  argaddr(0, &addr);
+  if(p->linux_brk == 0)
+    p->linux_brk = p->sz;
+  if(addr == 0)
+    return p->linux_brk;
+  if(addr < p->linux_brk)
+    return p->linux_brk;
+  if(p->linux_brk_limit && addr >= p->linux_brk_limit)
+    return p->linux_brk;
+  if(addr > p->sz){
+    if(growproc(addr - p->sz) < 0)
+      return p->linux_brk;
+  }
+  p->linux_brk = addr;
+  return p->linux_brk;
+}
+
+uint64
+sys_linux_gettid(void)
+{
+  return myproc()->pid;
+}
+
+uint64
+sys_linux_getppid(void)
+{
+  struct proc *p = myproc();
+  int pid = 1;
+
+  if(p->parent)
+    pid = p->parent->pid;
+  return pid;
+}
+
+uint64
+sys_linux_set_tid_address(void)
+{
+  return myproc()->pid;
+}
+
+uint64
+sys_linux_set_robust_list(void)
+{
+  return 0;
+}
+
+uint64
+sys_linux_uname(void)
+{
+  uint64 addr;
+  char uts[390];
+  char *fields[] = {
+    "Linux",
+    "xv6",
+    "5.4.0",
+    "xv6-linux-compat",
+    "riscv64",
+    "xv6",
+  };
+
+  argaddr(0, &addr);
+  memset(uts, 0, sizeof(uts));
+  for(int i = 0; i < 6; i++)
+    safestrcpy(uts + i * 65, fields[i], 65);
+  if(copyout(myproc()->pagetable, addr, uts, sizeof(uts)) < 0)
+    return -1;
+  return 0;
+}
+
+uint64
+sys_linux_getrandom(void)
+{
+  uint64 buf;
+  int len;
+  char zeros[64];
+  int done = 0;
+
+  argaddr(0, &buf);
+  argint(1, &len);
+  if(len < 0)
+    return -1;
+  memset(zeros, 0, sizeof(zeros));
+  while(done < len){
+    int n = len - done;
+    if(n > sizeof(zeros))
+      n = sizeof(zeros);
+    if(copyout(myproc()->pagetable, buf + done, zeros, n) < 0)
+      return -1;
+    done += n;
+  }
+  return len;
+}
+
+uint64
+sys_linux_exit_group(void)
+{
+  int n;
+  argint(0, &n);
+  kexit(n);
+  return 0;
 }
 
 uint64

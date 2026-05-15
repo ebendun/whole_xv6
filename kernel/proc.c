@@ -130,7 +130,12 @@ found:
   p->state = USED;
   p->interpose_mask = 0;
   p->interpose_path[0] = 0;
+  p->cwd_is_ext4 = 0;
+  safestrcpy(p->ext4_cwd, "/", sizeof(p->ext4_cwd));
   p->mmap_base = USYSCALL;
+  p->is_linux = 0;
+  p->linux_brk = 0;
+  p->linux_brk_limit = 0;
   memset(p->vmas, 0, sizeof(p->vmas));
 
   // Allocate a trapframe page.
@@ -188,6 +193,9 @@ freeproc(struct proc *p)
     proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
   p->sz = 0;
+  p->is_linux = 0;
+  p->linux_brk = 0;
+  p->linux_brk_limit = 0;
   p->pid = 0;
   p->parent = 0;
   p->name[0] = 0;
@@ -197,6 +205,8 @@ freeproc(struct proc *p)
 
   p->interpose_mask = 0;
   p->interpose_path[0] = 0;
+  p->cwd_is_ext4 = 0;
+  p->ext4_cwd[0] = 0;
   
   p->alarm_interval = 0;
   p->alarm_ticks = 0;
@@ -211,6 +221,8 @@ static int
 vmawriteback(struct proc *p, struct vma *v, uint64 addr, uint64 len)
 {
   if((v->flags & MAP_SHARED) == 0 || (v->prot & PROT_WRITE) == 0)
+    return 0;
+  if(v->f == 0)
     return 0;
 
   int max = ((MAXOPBLOCKS-1-1-2) / 2) * BSIZE;
@@ -279,7 +291,8 @@ proc_munmap(struct proc *p, uint64 addr, uint64 len)
   uvmunmap(p->pagetable, addr, len / PGSIZE, 1);
 
   if(addr == v->addr && addr + len == vend){
-    fileclose(v->f);
+    if(v->f)
+      fileclose(v->f);
     memset(v, 0, sizeof(*v));
   } else if(addr == v->addr){
     v->addr += len;
@@ -430,12 +443,17 @@ kfork(void)
     if(p->ofile[i])
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
+  np->cwd_is_ext4 = p->cwd_is_ext4;
+  safestrcpy(np->ext4_cwd, p->ext4_cwd, sizeof(np->ext4_cwd));
   np->interpose_mask = p->interpose_mask;
   safestrcpy(np->interpose_path, p->interpose_path, sizeof(np->interpose_path));
   np->mmap_base = p->mmap_base;
+  np->is_linux = p->is_linux;
+  np->linux_brk = p->linux_brk;
+  np->linux_brk_limit = p->linux_brk_limit;
   for(i = 0; i < NVMA; i++){
     np->vmas[i] = p->vmas[i];
-    if(np->vmas[i].used)
+    if(np->vmas[i].used && np->vmas[i].f)
       filedup(np->vmas[i].f);
   }
 
@@ -567,6 +585,44 @@ kwait(uint64 addr)
     // Wait for a child to exit.
     sleep(p, &wait_lock);  //DOC: wait-sleep
   }
+}
+
+int
+kwait_options(uint64 addr, int options)
+{
+  struct proc *pp;
+  int havekids, pid;
+  struct proc *p = myproc();
+
+  if((options & 1) == 0)
+    return kwait(addr);
+
+  acquire(&wait_lock);
+  havekids = 0;
+  for(pp = proc; pp < &proc[NPROC]; pp++){
+    if(pp->parent == p){
+      acquire(&pp->lock);
+      havekids = 1;
+      if(pp->state == ZOMBIE){
+        pid = pp->pid;
+        if(addr != 0 && copyout(p->pagetable, addr, (char *)&pp->xstate,
+                                sizeof(pp->xstate)) < 0){
+          release(&pp->lock);
+          release(&wait_lock);
+          return -1;
+        }
+        freeproc(pp);
+        release(&pp->lock);
+        release(&wait_lock);
+        return pid;
+      }
+      release(&pp->lock);
+    }
+  }
+  release(&wait_lock);
+  if(!havekids || killed(p))
+    return -1;
+  return 0;
 }
 
 // Per-CPU process scheduler.
@@ -855,4 +911,3 @@ procdump(void)
     printf("\n");
   }
 }
-

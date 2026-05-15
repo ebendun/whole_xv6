@@ -111,6 +111,9 @@ struct proc {
   // these are private to the process, so p->lock need not be held.
   uint64 kstack;               // Virtual address of kernel stack
   uint64 sz;                   // Size of process memory (bytes)
+  int is_linux;                // Process is running a Linux ABI image
+  uint64 linux_brk;            // Current Linux ABI program break
+  uint64 linux_brk_limit;      // Highest Linux brk before the stack guard
   pagetable_t pagetable;       // User page table
   struct trapframe *trapframe; // data page for trampoline.S
   struct usyscall *usyscall;   // shared user/kernel page
@@ -122,6 +125,8 @@ struct proc {
   struct context context;      // swtch() here to run process
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
+  int cwd_is_ext4;             // Current directory is on FIRSTDEV ext4 image
+  char ext4_cwd[MAXPATH];      // Absolute cwd path on the ext4 image
   char name[16];               // Process name (debugging)
   int interpose_mask;          // Bit mask of blocked syscalls
   char interpose_path[MAXPATH];// Allowed path for masked open/exec

@@ -7,6 +7,7 @@
 #include "fs.h"
 #include "ext4.h"
 #include "buf.h"
+#include "proc.h"
 
 // Read-only ext4 reader used by ext4 probe path.
 
@@ -442,16 +443,18 @@ void ext4_list_root(int dev)
   }
 }
 
-int ext4_read_file_by_path(int dev, const char *path, uchar *dst, uint32 len)
+static int
+ext4_lookup_path(int dev, const char *path, struct ext4_inode *out)
 {
   char pcopy[256];
   char *tok;
   uint32 inode_no = EXT4_ROOTINO;
 
   if(!ext4_present) return -1;
-  // only support absolute paths like /foo
   if(path[0] != '/') return -1;
-  if(path[1] == '\0') return -1;
+  if(path[1] == '\0'){
+    return ext4_read_inode(dev, EXT4_ROOTINO, out);
+  }
 
   safestrcpy(pcopy, path+1, sizeof(pcopy)); // skip leading '/'
   tok = pcopy;
@@ -484,14 +487,49 @@ int ext4_read_file_by_path(int dev, const char *path, uchar *dst, uint32 len)
       return -1;
   }
 
-  // inode_no now the target file
+  return ext4_read_inode(dev, inode_no, out);
+}
+
+int
+ext4_read_file_by_path_at(int dev, const char *path, uchar *dst, uint32 len, uint32 off)
+{
   struct ext4_inode inode;
-  if(ext4_read_inode(dev, inode_no, &inode) < 0) return -1;
+
+  if(ext4_lookup_path(dev, path, &inode) < 0) return -1;
   if(!ext4_inode_mode_is_reg(&inode))
     return -1;
-  uint32 isize = (uint32)ext4_inode_size(&inode);
-  if(len > isize) len = isize;
-  return ext4_read_data(dev, &inode, dst, len, 0);
+  return ext4_read_data(dev, &inode, dst, len, off);
+}
+
+int
+ext4_read_file_by_path(int dev, const char *path, uchar *dst, uint32 len)
+{
+  return ext4_read_file_by_path_at(dev, path, dst, len, 0);
+}
+
+uint64
+ext4_file_size_by_path(int dev, const char *path)
+{
+  struct ext4_inode inode;
+  if(ext4_lookup_path(dev, path, &inode) < 0) return 0;
+  if(!ext4_inode_mode_is_reg(&inode)) return 0;
+  return ext4_inode_size(&inode);
+}
+
+int
+ext4_path_is_dir(int dev, const char *path)
+{
+  struct ext4_inode inode;
+  if(ext4_lookup_path(dev, path, &inode) < 0) return 0;
+  return ext4_inode_mode_is_dir(&inode);
+}
+
+int
+ext4_path_is_reg(int dev, const char *path)
+{
+  struct ext4_inode inode;
+  if(ext4_lookup_path(dev, path, &inode) < 0) return 0;
+  return ext4_inode_mode_is_reg(&inode);
 }
 
 static int
@@ -605,4 +643,69 @@ ext4_print_sh_scripts(int dev)
     ext4_walk_all_files(dev, ino, "/glibc", 0);
   if(ext4_lookup_name_in_dir(dev, &root_inode, "musl", &ino) == 0)
     ext4_walk_all_files(dev, ino, "/musl", 0);
+}
+
+
+void
+ext4_join_path(char *out, int outsz, char *cwd, char *path)
+{
+  int oi = 0;
+  char tmp[MAXPATH];
+  char *p;
+
+  if(path[0] == '/')
+    safestrcpy(tmp, path, sizeof(tmp));
+  else if(cwd[0] == '/' && cwd[1] == 0)
+    snprintf(tmp, sizeof(tmp), "/%s", path);
+  else
+    snprintf(tmp, sizeof(tmp), "%s/%s", cwd, path);
+
+  out[oi++] = '/';
+  p = tmp;
+  while(*p && oi < outsz - 1){
+    char elem[MAXPATH];
+    int n = 0;
+    while(*p == '/')
+      p++;
+    if(*p == 0)
+      break;
+    while(*p && *p != '/' && n < sizeof(elem) - 1)
+      elem[n++] = *p++;
+    elem[n] = 0;
+    while(*p && *p != '/')
+      p++;
+    if(n == 1 && elem[0] == '.')
+      continue;
+    if(n == 2 && elem[0] == '.' && elem[1] == '.'){
+      if(oi > 1){
+        oi--;
+        while(oi > 1 && out[oi-1] != '/')
+          oi--;
+      }
+      out[oi] = 0;
+      continue;
+    }
+    if(oi > 1 && oi < outsz - 1)
+      out[oi++] = '/';
+    for(int i = 0; i < n && oi < outsz - 1; i++)
+      out[oi++] = elem[i];
+    out[oi] = 0;
+  }
+  out[oi] = 0;
+}
+
+int
+resolve_ext4_path(char *path, char *out, int outsz)
+{
+  struct proc *p = myproc();
+
+  if(path[0] == '/'){
+    ext4_join_path(out, outsz, "/", path);
+    return 1;
+  }
+  if(p->cwd_is_ext4){
+    ext4_join_path(out, outsz, p->ext4_cwd, path);
+    return 1;
+  }
+  return 0;
 }

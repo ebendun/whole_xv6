@@ -82,28 +82,10 @@ argstr(int n, char *buf, int max)
   return fetchstr(addr, buf, max);
 }
 
-static int
-interpose_allow_path(struct proc *p, int num)
-{
-  char path[MAXPATH];
-
-  if(num != SYS_open && num != SYS_exec)
-    return 0;
-  if(p->interpose_path[0] == 0)
-    return 0;
-  if(argstr(0, path, MAXPATH) < 0)
-    return 0;
-  return strncmp(path, p->interpose_path, MAXPATH) == 0;
-}
-
 // Prototypes for the functions that handle system calls.
-extern uint64 sys_fork(void);
 extern uint64 sys_exit(void);
-extern uint64 sys_wait(void);
-extern uint64 sys_pipe(void);
 extern uint64 sys_read(void);
 extern uint64 sys_kill(void);
-extern uint64 sys_exec(void);
 extern uint64 sys_fstat(void);
 extern uint64 sys_chdir(void);
 extern uint64 sys_dup(void);
@@ -111,12 +93,7 @@ extern uint64 sys_getpid(void);
 extern uint64 sys_sbrk(void);
 extern uint64 sys_pause(void);
 extern uint64 sys_uptime(void);
-extern uint64 sys_open(void);
 extern uint64 sys_write(void);
-extern uint64 sys_mknod(void);
-extern uint64 sys_unlink(void);
-extern uint64 sys_link(void);
-extern uint64 sys_mkdir(void);
 extern uint64 sys_close(void);
 extern uint64 sys_interpose(void);
 extern uint64 sys_pgpte(void);
@@ -128,66 +105,141 @@ extern uint64 sys_unbind(void);
 extern uint64 sys_send(void);
 extern uint64 sys_recv(void);
 extern uint64 sys_cpupin(void);
-extern uint64 sys_mmap(void);
 extern uint64 sys_munmap(void);
+extern uint64 sys_linux_openat(void);
+extern uint64 sys_linux_writev(void);
+extern uint64 sys_linux_mmap(void);
+extern uint64 sys_linux_newfstatat(void);
+extern uint64 sys_linux_brk(void);
+extern uint64 sys_linux_gettid(void);
+extern uint64 sys_linux_getppid(void);
+extern uint64 sys_linux_set_tid_address(void);
+extern uint64 sys_linux_set_robust_list(void);
+extern uint64 sys_linux_uname(void);
+extern uint64 sys_linux_getrandom(void);
+extern uint64 sys_linux_exit_group(void);
+extern uint64 sys_linux_execve(void);
+extern uint64 sys_linux_clone(void);
+extern uint64 sys_linux_wait4(void);
+extern uint64 sys_linux_pipe2(void);
+extern uint64 sys_linux_dup3(void);
+extern uint64 sys_linux_fcntl(void);
+extern uint64 sys_linux_sendfile(void);
+extern uint64 sys_linux_ppoll(void);
+extern uint64 sys_linux_mknodat(void);
+extern uint64 sys_linux_mkdirat(void);
+extern uint64 sys_linux_unlinkat(void);
+extern uint64 sys_linux_linkat(void);
 
+static uint64
+sys_zero(void)
+{
+  return 0;
+}
 
-// An array mapping syscall numbers from syscall.h
-// to the function that handles the system call.
-static uint64 (*syscalls[])(void) = {
-[SYS_fork]    sys_fork,
-[SYS_exit]    sys_exit,
-[SYS_wait]    sys_wait,
-[SYS_pipe]    sys_pipe,
-[SYS_read]    sys_read,
-[SYS_kill]    sys_kill,
-[SYS_exec]    sys_exec,
-[SYS_fstat]   sys_fstat,
-[SYS_chdir]   sys_chdir,
-[SYS_dup]     sys_dup,
-[SYS_getpid]  sys_getpid,
-[SYS_sbrk]    sys_sbrk,
-[SYS_pause]   sys_pause,
-[SYS_uptime]  sys_uptime,
-[SYS_open]    sys_open,
-[SYS_write]   sys_write,
-[SYS_mknod]   sys_mknod,
-[SYS_unlink]  sys_unlink,
-[SYS_link]    sys_link,
-[SYS_mkdir]   sys_mkdir,
-[SYS_close]   sys_close,
-[SYS_interpose] sys_interpose,
-[SYS_pgpte] sys_pgpte,
-[SYS_kpgtbl] sys_kpgtbl,
-[SYS_sigalarm]  sys_sigalarm,
-[SYS_sigreturn] sys_sigreturn,
-[SYS_bind] sys_bind,
-[SYS_unbind] sys_unbind,
-[SYS_send] sys_send,
-[SYS_recv] sys_recv,
-[SYS_cpupin] sys_cpupin,
-[SYS_mmap]    sys_mmap,
-[SYS_munmap]  sys_munmap,
+static uint64
+sys_minus_one(void)
+{
+  return -1;
+}
+
+struct syscall_entry {
+  int num;
+  uint64 (*fn)(void);
 };
 
+static struct syscall_entry syscall_table[] = {
+  {17, sys_minus_one},                 // getcwd
+  {SYS_dup, sys_dup},
+  {SYS_dup3, sys_linux_dup3},
+  {25, sys_linux_fcntl},               // fcntl
+  {29, sys_minus_one},                 // ioctl
+  {SYS_mknodat, sys_linux_mknodat},
+  {SYS_mkdirat, sys_linux_mkdirat},
+  {SYS_unlinkat, sys_linux_unlinkat},
+  {SYS_linkat, sys_linux_linkat},
+  {SYS_chdir, sys_chdir},
+  {SYS_openat, sys_linux_openat},
+  {SYS_close, sys_close},
+  {SYS_pipe2, sys_linux_pipe2},
+  {SYS_read, sys_read},
+  {SYS_write, sys_write},
+  {SYS_writev, sys_linux_writev},
+  {SYS_sendfile, sys_linux_sendfile},
+  {SYS_ppoll, sys_linux_ppoll},
+  {78, sys_minus_one},                 // readlinkat
+  {SYS_newfstatat, sys_linux_newfstatat},
+  {SYS_fstat, sys_fstat},
+  {SYS_exit, sys_exit},
+  {SYS_exit_group, sys_linux_exit_group},
+  {SYS_set_tid_address, sys_linux_set_tid_address},
+  {98, sys_minus_one},                 // futex
+  {SYS_set_robust_list, sys_linux_set_robust_list},
+  {SYS_nanosleep, sys_pause},
+  {SYS_clock_gettime, sys_minus_one},
+  {SYS_kill, sys_kill},
+  {131, sys_zero},                     // tgkill
+  {SYS_rt_sigaction, sys_zero},
+  {SYS_rt_sigprocmask, sys_zero},
+  {143, sys_zero},                     // setregid
+  {144, sys_zero},                     // setgid
+  {145, sys_zero},                     // setreuid
+  {146, sys_zero},                     // setuid
+  {SYS_uname, sys_linux_uname},
+  {SYS_getpid, sys_getpid},
+  {SYS_getppid, sys_linux_getppid},
+  {SYS_getuid, sys_zero},
+  {SYS_geteuid, sys_zero},
+  {SYS_getgid, sys_zero},
+  {SYS_getegid, sys_zero},
+  {SYS_gettid, sys_linux_gettid},
+  {SYS_brk, sys_linux_brk},
+  {SYS_munmap, sys_munmap},
+  {SYS_clone, sys_linux_clone},
+  {SYS_execve, sys_linux_execve},
+  {SYS_mmap, sys_linux_mmap},
+  {SYS_mprotect, sys_zero},
+  {SYS_wait4, sys_linux_wait4},
+  {SYS_prlimit64, sys_minus_one},
+  {SYS_getrandom, sys_linux_getrandom},
+
+  //just for memory xv6 lab
+  {SYS_sbrk, sys_sbrk},
+  {SYS_pause, sys_pause},
+  {SYS_uptime, sys_uptime},
+  {SYS_interpose, sys_interpose},
+  {SYS_pgpte, sys_pgpte},
+  {SYS_kpgtbl, sys_kpgtbl},
+  {SYS_sigalarm, sys_sigalarm},
+  {SYS_sigreturn, sys_sigreturn},
+  {SYS_bind, sys_bind},
+  {SYS_unbind, sys_unbind},
+  {SYS_send, sys_send},
+  {SYS_recv, sys_recv},
+  {SYS_cpupin, sys_cpupin},
+};
+
+static uint64 (*syscall_lookup(int num))(void)
+{
+  for(int i = 0; i < NELEM(syscall_table); i++){
+    if(syscall_table[i].num == num)
+      return syscall_table[i].fn;
+  }
+  return 0;
+}
 
 void
 syscall(void)
 {
   int num;
   struct proc *p = myproc();
+  uint64 (*fn)(void);
 
   num = p->trapframe->a7;
-  if(num > 0 && num < NELEM(syscalls) && syscalls[num]) {
-    if((p->interpose_mask & (1 << num)) && !interpose_allow_path(p, num)) {
-      p->trapframe->a0 = -1;
-      return;
-    }
-    // Use num to lookup the system call function for num, call it,
-    // and store its return value in p->trapframe->a0
-    p->trapframe->a0 = syscalls[num]();
+  if((fn = syscall_lookup(num)) != 0) {
+    p->trapframe->a0 = fn();
   } else {
-    printf("%d %s: unknown sys call %d\n",
+    printf("%d %s: unknown linux sys call %d\n",
             p->pid, p->name, num);
     p->trapframe->a0 = -1;
   }

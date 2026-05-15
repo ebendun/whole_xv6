@@ -97,6 +97,18 @@ filestat(struct file *f, uint64 addr)
     if(copyout(p->pagetable, addr, (char *)&st, sizeof(st)) < 0)
       return -1;
     return 0;
+  } 
+  else if(f->type == FD_EXT4){
+    memset(&st, 0, sizeof(st));
+    st.dev = FIRSTDEV;
+    st.type = T_FILE;
+    st.nlink = 1;
+    st.size = ext4_file_size_by_path(FIRSTDEV, f->ext4_path);
+    if(st.size == 0 && !ext4_path_is_reg(FIRSTDEV, f->ext4_path))
+      return -1;
+    if(copyout(p->pagetable, addr, (char *)&st, sizeof(st)) < 0)
+      return -1;
+    return 0;
   }
   return -1;
 }
@@ -122,6 +134,22 @@ fileread(struct file *f, uint64 addr, int n)
     if((r = readi(f->ip, 1, addr, f->off, n)) > 0)
       f->off += r;
     iunlock(f->ip);
+  } else if(f->type == FD_EXT4){
+    char *buf = kalloc();
+    int m;
+    if(buf == 0)
+      return -1;
+    m = n;
+    if(m > PGSIZE)
+      m = PGSIZE;
+    r = ext4_read_file_by_path_at(FIRSTDEV, f->ext4_path, (uchar *)buf, m, f->off);
+    if(r > 0){
+      if(copyout(myproc()->pagetable, addr, buf, r) < 0)
+        r = -1;
+      else
+        f->off += r;
+    }
+    kfree(buf);
   } else {
     panic("fileread");
   }
@@ -171,10 +199,11 @@ filewrite(struct file *f, uint64 addr, int n)
       i += r;
     }
     ret = (i == n ? n : -1);
+  } else if(f->type == FD_EXT4){
+    ret = -1;
   } else {
     panic("filewrite");
   }
 
   return ret;
 }
-

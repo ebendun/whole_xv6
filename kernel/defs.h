@@ -80,6 +80,7 @@ int             pipealloc(struct file**, struct file**);
 void            pipeclose(struct pipe*, int);
 int             piperead(struct pipe*, uint64, int);
 int             pipewrite(struct pipe*, uint64, int);
+int             pipewrite_kernel(struct pipe*, char*, int);
 
 // printf.c
 int             printf(char*, ...) __attribute__ ((format (printf, 1, 2)));
@@ -108,6 +109,7 @@ void            sched(void);
 void            sleep(void*, struct spinlock*);
 void            userinit(void);
 int             kwait(uint64);
+int             kwait_options(uint64, int);
 void            wakeup(void*);
 void            yield(void);
 int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
@@ -213,8 +215,13 @@ void            ext4_init(void);
 int             ext4_read_super(int dev);
 void            ext4_list_root(int dev);
 int             ext4_read_file_by_path(int dev, const char *path, uchar *dst, uint32 len);
+int             ext4_read_file_by_path_at(int dev, const char *path, uchar *dst, uint32 len, uint32 off);
+uint64          ext4_file_size_by_path(int dev, const char *path);
+int             ext4_path_is_dir(int dev, const char *path);
+int             ext4_path_is_reg(int dev, const char *path);
 void            ext4_print_sh_scripts(int dev);
-
+void            ext4_join_path(char *out, int outsz, char *cwd, char *path);
+int             resolve_ext4_path(char *path, char *out, int outsz);
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
 
