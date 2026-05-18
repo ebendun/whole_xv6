@@ -4,6 +4,14 @@
 #include "kernel/fs.h"
 #include "kernel/fcntl.h"
 
+struct linux_dirent64 {
+  uint64 d_ino;
+  uint64 d_off;
+  ushort d_reclen;
+  uchar d_type;
+  char d_name[1];
+};
+
 char*
 fmtname(char *path)
 {
@@ -29,7 +37,6 @@ ls(char *path)
 {
   char buf[512], *p;
   int fd;
-  struct dirent de;
   struct stat st;
 
   if((fd = open(path, O_RDONLY)) < 0){
@@ -54,19 +61,37 @@ ls(char *path)
       printf("ls: path too long\n");
       break;
     }
-    strcpy(buf, path);
-    p = buf+strlen(buf);
-    *p++ = '/';
-    while(read(fd, &de, sizeof(de)) == sizeof(de)){
-      if(de.inum == 0)
-        continue;
-      memmove(p, de.name, DIRSIZ);
-      p[DIRSIZ] = 0;
-      if(stat(buf, &st) < 0){
-        printf("ls: cannot stat %s\n", buf);
-        continue;
+    {
+      char dbuf[512];
+      int nread, bpos;
+
+      while((nread = __sys_getdents64(fd, dbuf, sizeof(dbuf))) > 0){
+        for(bpos = 0; bpos < nread; ){
+          struct linux_dirent64 *d = (struct linux_dirent64 *)(dbuf + bpos);
+          int namelen;
+
+          if(d->d_reclen == 0)
+            break;
+          bpos += d->d_reclen;
+          if(d->d_ino == 0)
+            continue;
+
+          namelen = strlen(d->d_name);
+          if(strlen(path) + 1 + namelen + 1 > sizeof buf){
+            printf("ls: path too long\n");
+            continue;
+          }
+          strcpy(buf, path);
+          p = buf+strlen(buf);
+          *p++ = '/';
+          memmove(p, d->d_name, namelen + 1);
+          if(stat(buf, &st) < 0){
+            printf("ls: cannot stat %s\n", buf);
+            continue;
+          }
+          printf("%s %d %d %d\n", fmtname(buf), st.type, st.ino, (int) st.size);
+        }
       }
-      printf("%s %d %d %d\n", fmtname(buf), st.type, st.ino, (int) st.size);
     }
     break;
   }

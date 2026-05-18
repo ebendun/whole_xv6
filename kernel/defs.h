@@ -110,6 +110,7 @@ void            sleep(void*, struct spinlock*);
 void            userinit(void);
 int             kwait(uint64);
 int             kwait_options(uint64, int);
+int             kwait_linux(uint64);
 void            wakeup(void*);
 void            yield(void);
 int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
@@ -219,6 +220,9 @@ int             ext4_read_file_by_path_at(int dev, const char *path, uchar *dst,
 uint64          ext4_file_size_by_path(int dev, const char *path);
 int             ext4_path_is_dir(int dev, const char *path);
 int             ext4_path_is_reg(int dev, const char *path);
+int             ext4_stat_by_path(int dev, const char *path, uint64 *mode, uint64 *size, uint64 *ino);
+int             ext4_dirent_by_path(int dev, const char *path, uint64 off, uint64 *next,
+                                    uint64 *ino, uchar *type, char *name, int namesz);
 void            ext4_print_sh_scripts(int dev);
 void            ext4_join_path(char *out, int outsz, char *cwd, char *path);
 int             resolve_ext4_path(char *path, char *out, int outsz);

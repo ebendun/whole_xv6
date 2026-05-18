@@ -114,10 +114,6 @@ CFLAGS += -DKCSAN
 KCSANFLAG = -fsanitize=thread -fno-inline
 endif
 
-ifeq ($(LAB),net)
-CFLAGS += -DNET_TESTS_PORT=$(SERVERPORT)
-endif
-
 ifdef KCSAN
 CFLAGS += -DKCSAN
 KCSANFLAG = -fsanitize=thread -fno-inline

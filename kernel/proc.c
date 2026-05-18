@@ -224,6 +224,8 @@ vmawriteback(struct proc *p, struct vma *v, uint64 addr, uint64 len)
     return 0;
   if(v->f == 0)
     return 0;
+  if(v->f->type == FD_EXT4)
+    return -1;
 
   int max = ((MAXOPBLOCKS-1-1-2) / 2) * BSIZE;
   for(uint64 a = addr; a < addr + len; a += PGSIZE){
@@ -623,6 +625,45 @@ kwait_options(uint64 addr, int options)
   if(!havekids || killed(p))
     return -1;
   return 0;
+}
+
+int
+kwait_linux(uint64 addr)
+{
+  struct proc *pp;
+  int havekids, pid;
+  struct proc *p = myproc();
+
+  acquire(&wait_lock);
+  for(;;){
+    havekids = 0;
+    for(pp = proc; pp < &proc[NPROC]; pp++){
+      if(pp->parent == p){
+        acquire(&pp->lock);
+        havekids = 1;
+        if(pp->state == ZOMBIE){
+          int status = pp->xstate << 8;
+          pid = pp->pid;
+          if(addr != 0 && copyout(p->pagetable, addr, (char *)&status,
+                                  sizeof(status)) < 0){
+            release(&pp->lock);
+            release(&wait_lock);
+            return -1;
+          }
+          freeproc(pp);
+          release(&pp->lock);
+          release(&wait_lock);
+          return pid;
+        }
+        release(&pp->lock);
+      }
+    }
+    if(!havekids || killed(p)){
+      release(&wait_lock);
+      return -1;
+    }
+    sleep(p, &wait_lock);
+  }
 }
 
 // Per-CPU process scheduler.

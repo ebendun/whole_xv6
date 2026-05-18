@@ -17,6 +17,9 @@
 #include "file.h"
 #include "fcntl.h"
 
+static int linux_copy_stat(uint64 staddr, uint64 dev, uint64 ino,
+                           uint64 mode, uint64 nlink, uint64 size);
+
 // Fetch the nth word-sized system call argument as a file descriptor
 // and return both the descriptor and the corresponding struct file.
 static int
@@ -81,7 +84,7 @@ sys_linux_dup3(void)
   if(oldfd < 0 || oldfd >= NOFILE || newfd < 0 || newfd >= NOFILE)
     return -1;
   if(oldfd == newfd)
-    return -1;
+    return newfd;
   if((f = p->ofile[oldfd]) == 0)
     return -1;
   if(p->ofile[newfd]){
@@ -188,7 +191,8 @@ sys_mmap(void)
     return -1;
   if(argfd(4, 0, &f) < 0)
     return -1;
-  if((flags != MAP_SHARED && flags != MAP_PRIVATE) || f->type != FD_INODE)
+  if((flags != MAP_SHARED && flags != MAP_PRIVATE) ||
+     (f->type != FD_INODE && f->type != FD_EXT4))
     return -1;
   if((prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) == 0)
     return -1;
@@ -211,9 +215,14 @@ sys_mmap(void)
   uint64 mapaddr = PGROUNDDOWN(p->mmap_base - maplen);
   if(mapaddr < p->sz || mapaddr + maplen > USYSCALL)
     return -1;
-  ilock(f->ip);
-  uint64 filelen = f->ip->size;
-  iunlock(f->ip);
+  uint64 filelen;
+  if(f->type == FD_EXT4){
+    filelen = ext4_file_size_by_path(FIRSTDEV, f->ext4_path);
+  } else {
+    ilock(f->ip);
+    filelen = f->ip->size;
+    iunlock(f->ip);
+  }
 
   p->mmap_base = mapaddr;
   p->vmas[slot].used = 1;
@@ -282,7 +291,7 @@ sys_munmap(void)
   argaddr(0, &addr);
   argaddr(1, &len);
 
-  if(proc_munmap(myproc(), addr, len) < 0)
+  if(proc_munmap(myproc(), addr, PGROUNDUP(len)) < 0)
     return -1;
   return 0;
 }
@@ -498,7 +507,7 @@ sys_open(void)
     char epath[MAXPATH];
     //judge the file wether in ext4 or not
     if(resolve_ext4_path(path, epath, sizeof(epath)) &&
-       ext4_path_is_reg(FIRSTDEV, epath)){
+       (ext4_path_is_reg(FIRSTDEV, epath) || ext4_path_is_dir(FIRSTDEV, epath))){
       if(omode & (O_WRONLY | O_RDWR))
         return -1;
       if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
@@ -603,7 +612,7 @@ sys_linux_openat(void)
   if((omode & O_CREATE) == 0){
     char epath[MAXPATH];
     if(resolve_ext4_path(path, epath, sizeof(epath)) &&
-       ext4_path_is_reg(FIRSTDEV, epath)){
+       (ext4_path_is_reg(FIRSTDEV, epath) || ext4_path_is_dir(FIRSTDEV, epath))){
       if(omode & (O_WRONLY | O_RDWR))
         return -1;
       if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
@@ -824,17 +833,13 @@ sys_linux_newfstatat(void)
     return -1;
   (void)dirfd;
 
-  char st[128];
-  memset(st, 0, sizeof(st));
   uint64 mode = 0100000 | 0777;
   uint64 size = 0;
+  uint64 ino = 0;
   char epath[MAXPATH];
   if(resolve_ext4_path(path, epath, sizeof(epath)) &&
-     ext4_path_is_reg(FIRSTDEV, epath)){
-    size = ext4_file_size_by_path(FIRSTDEV, epath);
-  } else if(resolve_ext4_path(path, epath, sizeof(epath)) &&
-            ext4_path_is_dir(FIRSTDEV, epath)){
-    mode = 0040000 | 0777;
+     ext4_stat_by_path(FIRSTDEV, epath, &mode, &size, &ino) == 0){
+    mode |= 0777;
   } else {
     struct inode *ip;
     begin_op();
@@ -844,6 +849,7 @@ sys_linux_newfstatat(void)
       return -1;
     }
     ilock(ip);
+    ino = ip->inum;
     if(ip->type == T_DIR)
       mode = 0040000 | 0777;
     else
@@ -852,12 +858,206 @@ sys_linux_newfstatat(void)
     end_op();
   }
 
-  // Minimal riscv64 Linux struct stat fields used by libc/busybox.
+  return linux_copy_stat(staddr, FIRSTDEV, ino, mode, 1, size);
+}
+
+static int
+linux_copy_stat(uint64 staddr, uint64 dev, uint64 ino,
+                uint64 mode, uint64 nlink, uint64 size)
+{
+  char st[128];
+
+  memset(st, 0, sizeof(st));
+  memmove(st + 0, &dev, sizeof(dev));   // st_dev
+  memmove(st + 8, &ino, sizeof(ino));   // st_ino
   memmove(st + 16, &mode, sizeof(mode)); // st_mode
+  memmove(st + 24, &nlink, sizeof(nlink)); // st_nlink
   memmove(st + 48, &size, sizeof(size)); // st_size
   if(copyout(myproc()->pagetable, staddr, st, sizeof(st)) < 0)
     return -1;
   return 0;
+}
+
+uint64
+sys_linux_fstat(void)
+{
+  struct file *f;
+  uint64 staddr;
+  uint64 mode = 0100000 | 0777;
+  uint64 size = 0;
+  struct proc *p = myproc();
+
+  argaddr(1, &staddr);
+  if(argfd(0, 0, &f) < 0)
+    return -1;
+
+  if(p->is_linux == 0)
+    return filestat(f, staddr);
+
+  if(f->type == FD_EXT4){
+    ext4_stat_by_path(FIRSTDEV, f->ext4_path, &mode, &size, 0);
+    mode |= 0777;
+  } else if(f->type == FD_INODE || f->type == FD_DEVICE){
+    ilock(f->ip);
+    if(f->ip->type == T_DIR)
+      mode = 0040000 | 0777;
+    else
+      size = f->ip->size;
+    iunlock(f->ip);
+  } else {
+    mode = 0010000 | 0777;
+  }
+
+  return linux_copy_stat(staddr, FIRSTDEV, 0, mode, 1, size);
+}
+
+static int
+copy_dirent64(uint64 dst, uint64 ino, uint64 off, uchar type, char *name)
+{
+  char de[280];
+  ushort reclen;
+  int namelen = strlen(name);
+
+  reclen = (ushort)((19 + namelen + 1 + 7) & ~7);
+  if(reclen > sizeof(de))
+    return -1;
+  memset(de, 0, sizeof(de));
+  memmove(de + 0, &ino, sizeof(ino));
+  memmove(de + 8, &off, sizeof(off));
+  memmove(de + 16, &reclen, sizeof(reclen));
+  de[18] = type;
+  memmove(de + 19, name, namelen + 1);
+  if(copyout(myproc()->pagetable, dst, de, reclen) < 0)
+    return -1;
+  return reclen;
+}
+
+static uchar
+linux_dtype_from_ext4(uchar type)
+{
+  if(type == 2)
+    return 4; // DT_DIR
+  if(type == 1)
+    return 8; // DT_REG
+  return 0;
+}
+
+uint64
+sys_linux_getdents64(void)
+{
+  struct file *f;
+  uint64 dirp;
+  int nread;
+  int n = 0;
+  int r;
+
+  argaddr(1, &dirp);
+  argint(2, &nread);
+  if(argfd(0, 0, &f) < 0 || nread < 48)
+    return -1;
+
+  if(f->type == FD_EXT4){
+    for(;;){
+      uint64 next, ino;
+      uchar type;
+      char name[256];
+      int ok = ext4_dirent_by_path(FIRSTDEV, f->ext4_path, f->off, &next,
+                                   &ino, &type, name, sizeof(name));
+      if(ok < 0)
+        return n > 0 ? n : -1;
+      if(ok == 0)
+        break;
+      r = copy_dirent64(dirp + n, ino, next, linux_dtype_from_ext4(type), name);
+      if(r < 0 || n + r > nread)
+        break;
+      n += r;
+      f->off = next;
+    }
+    return n;
+  }
+
+  if(f->type == FD_INODE){
+    struct dirent de;
+    ilock(f->ip);
+    if(f->ip->type != T_DIR){
+      iunlock(f->ip);
+      return -1;
+    }
+    while(f->off + sizeof(de) <= f->ip->size){
+      if(readi(f->ip, 0, (uint64)&de, f->off, sizeof(de)) != sizeof(de))
+        break;
+      f->off += sizeof(de);
+      if(de.inum == 0)
+        continue;
+      de.name[DIRSIZ-1] = 0;
+      r = copy_dirent64(dirp + n, de.inum, f->off, 0, de.name);
+      if(r < 0 || n + r > nread)
+        break;
+      n += r;
+    }
+    iunlock(f->ip);
+    return n;
+  }
+
+  return n;
+}
+
+uint64
+sys_linux_mount(void)
+{
+  return 0;
+}
+
+uint64
+sys_linux_faccessat(void)
+{
+  char path[MAXPATH], epath[MAXPATH];
+  struct inode *ip;
+
+  if(argstr(1, path, MAXPATH) < 0)
+    return -1;
+  if(resolve_ext4_path(path, epath, sizeof(epath)) &&
+     (ext4_path_is_reg(FIRSTDEV, epath) || ext4_path_is_dir(FIRSTDEV, epath)))
+    return 0;
+
+  begin_op();
+  ip = namei(path);
+  if(ip == 0){
+    end_op();
+    return -1;
+  }
+  iput(ip);
+  end_op();
+  return 0;
+}
+
+uint64
+sys_linux_readlinkat(void)
+{
+  char path[MAXPATH];
+  uint64 buf;
+  int size;
+  char target[MAXPATH];
+  int n;
+
+  if(argstr(1, path, MAXPATH) < 0)
+    return -1;
+  argaddr(2, &buf);
+  argint(3, &size);
+  if(size <= 0)
+    return -1;
+
+  if(strncmp(path, "/proc/self/exe", 14) == 0)
+    safestrcpy(target, myproc()->name, sizeof(target));
+  else
+    return -1;
+
+  n = strlen(target);
+  if(n > size)
+    n = size;
+  if(copyout(myproc()->pagetable, buf, target, n) < 0)
+    return -1;
+  return n;
 }
 
 uint64
@@ -888,8 +1088,21 @@ sys_linux_mkdirat(void)
   (void)dirfd;
   (void)mode;
 
+  if(argstr(1, path, MAXPATH) < 0)
+    return -1;
   begin_op();
-  if(argstr(1, path, MAXPATH) < 0 || (ip = create(path, T_DIR, 0, 0)) == 0){
+  if((ip = namei(path)) != 0){
+    ilock(ip);
+    if(ip->type == T_DIR){
+      iunlockput(ip);
+      end_op();
+      return 0;
+    }
+    iunlockput(ip);
+    end_op();
+    return -1;
+  }
+  if((ip = create(path, T_DIR, 0, 0)) == 0){
     end_op();
     return -1;
   }
@@ -1071,6 +1284,13 @@ sys_chdir(void)
   if(argstr(0, path, MAXPATH) < 0)
     return -1;
 
+  if(path[0] != '/' && p->cwd_is_ext4 &&
+     resolve_ext4_path(path, epath, sizeof(epath)) &&
+     ext4_path_is_dir(FIRSTDEV, epath)){
+    safestrcpy(p->ext4_cwd, epath, sizeof(p->ext4_cwd));
+    return 0;
+  }
+
   begin_op();
   if((ip = namei(path)) != 0){
     ilock(ip);
@@ -1097,6 +1317,32 @@ sys_chdir(void)
   }
 
   return -1;
+}
+
+uint64
+sys_linux_getcwd(void)
+{
+  uint64 buf;
+  int size;
+  struct proc *p = myproc();
+  char path[MAXPATH];
+  int n;
+
+  argaddr(0, &buf);
+  argint(1, &size);
+  if(size <= 0)
+    return -1;
+
+  if(p->cwd_is_ext4)
+    safestrcpy(path, p->ext4_cwd, sizeof(path));
+  else
+    safestrcpy(path, "/", sizeof(path));
+  n = strlen(path) + 1;
+  if(n > size)
+    return -1;
+  if(copyout(p->pagetable, buf, path, n) < 0)
+    return -1;
+  return buf;
 }
 
 uint64

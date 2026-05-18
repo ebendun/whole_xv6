@@ -101,10 +101,11 @@ filestat(struct file *f, uint64 addr)
   else if(f->type == FD_EXT4){
     memset(&st, 0, sizeof(st));
     st.dev = FIRSTDEV;
-    st.type = T_FILE;
+    st.type = ext4_path_is_dir(FIRSTDEV, f->ext4_path) ? T_DIR : T_FILE;
     st.nlink = 1;
     st.size = ext4_file_size_by_path(FIRSTDEV, f->ext4_path);
-    if(st.size == 0 && !ext4_path_is_reg(FIRSTDEV, f->ext4_path))
+    if(st.size == 0 && !ext4_path_is_reg(FIRSTDEV, f->ext4_path) &&
+       !ext4_path_is_dir(FIRSTDEV, f->ext4_path))
       return -1;
     if(copyout(p->pagetable, addr, (char *)&st, sizeof(st)) < 0)
       return -1;
@@ -135,6 +136,29 @@ fileread(struct file *f, uint64 addr, int n)
       f->off += r;
     iunlock(f->ip);
   } else if(f->type == FD_EXT4){
+    if(ext4_path_is_dir(FIRSTDEV, f->ext4_path)){
+      struct dirent de;
+      uint64 next, ino;
+      uchar type;
+      char name[DIRSIZ + 1];
+      int ok;
+
+      if(n < sizeof(de))
+        return -1;
+      for(;;){
+        ok = ext4_dirent_by_path(FIRSTDEV, f->ext4_path, f->off, &next,
+                                 &ino, &type, name, sizeof(name));
+        if(ok <= 0)
+          return ok;
+        f->off = next;
+        memset(&de, 0, sizeof(de));
+        de.inum = ino;
+        safestrcpy(de.name, name, sizeof(de.name));
+        if(copyout(myproc()->pagetable, addr, (char *)&de, sizeof(de)) < 0)
+          return -1;
+        return sizeof(de);
+      }
+    }
     char *buf = kalloc();
     int m;
     if(buf == 0)

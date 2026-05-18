@@ -106,7 +106,10 @@ extern uint64 sys_send(void);
 extern uint64 sys_recv(void);
 extern uint64 sys_cpupin(void);
 extern uint64 sys_munmap(void);
+extern uint64 sys_linux_getcwd(void);
 extern uint64 sys_linux_openat(void);
+extern uint64 sys_linux_fstat(void);
+extern uint64 sys_linux_getdents64(void);
 extern uint64 sys_linux_writev(void);
 extern uint64 sys_linux_mmap(void);
 extern uint64 sys_linux_newfstatat(void);
@@ -130,15 +133,23 @@ extern uint64 sys_linux_mknodat(void);
 extern uint64 sys_linux_mkdirat(void);
 extern uint64 sys_linux_unlinkat(void);
 extern uint64 sys_linux_linkat(void);
+extern uint64 sys_linux_mount(void);
+extern uint64 sys_linux_faccessat(void);
+extern uint64 sys_linux_readlinkat(void);
+extern uint64 sys_linux_gettimeofday(void);
+extern uint64 sys_linux_clock_gettime(void);
+extern uint64 sys_linux_times(void);
+extern uint64 sys_linux_sched_yield(void);
+extern uint64 sys_linux_nanosleep(void);
 
 static uint64
-sys_zero(void)
+sys_linux_success(void)
 {
   return 0;
 }
 
 static uint64
-sys_minus_one(void)
+sys_linux_unsupported(void)
 {
   return -1;
 }
@@ -148,62 +159,70 @@ struct syscall_entry {
   uint64 (*fn)(void);
 };
 
-static struct syscall_entry syscall_table[] = {
-  {17, sys_minus_one},                 // getcwd
+static struct syscall_entry linux_syscalls[] = {
+  {17, sys_linux_getcwd},
   {SYS_dup, sys_dup},
   {SYS_dup3, sys_linux_dup3},
-  {25, sys_linux_fcntl},               // fcntl
-  {29, sys_minus_one},                 // ioctl
+  {SYS_fcntl, sys_linux_fcntl},
+  {SYS_ioctl, sys_linux_unsupported},
   {SYS_mknodat, sys_linux_mknodat},
   {SYS_mkdirat, sys_linux_mkdirat},
   {SYS_unlinkat, sys_linux_unlinkat},
   {SYS_linkat, sys_linux_linkat},
+  {SYS_umount2, sys_linux_success},
+  {SYS_mount, sys_linux_mount},
+  {SYS_faccessat, sys_linux_faccessat},
   {SYS_chdir, sys_chdir},
   {SYS_openat, sys_linux_openat},
   {SYS_close, sys_close},
   {SYS_pipe2, sys_linux_pipe2},
+  {SYS_getdents64, sys_linux_getdents64},
   {SYS_read, sys_read},
   {SYS_write, sys_write},
   {SYS_writev, sys_linux_writev},
   {SYS_sendfile, sys_linux_sendfile},
   {SYS_ppoll, sys_linux_ppoll},
-  {78, sys_minus_one},                 // readlinkat
+  {SYS_readlinkat, sys_linux_readlinkat},
   {SYS_newfstatat, sys_linux_newfstatat},
-  {SYS_fstat, sys_fstat},
+  {SYS_fstat, sys_linux_fstat},
   {SYS_exit, sys_exit},
   {SYS_exit_group, sys_linux_exit_group},
   {SYS_set_tid_address, sys_linux_set_tid_address},
-  {98, sys_minus_one},                 // futex
+  {SYS_futex, sys_linux_unsupported},
   {SYS_set_robust_list, sys_linux_set_robust_list},
-  {SYS_nanosleep, sys_pause},
-  {SYS_clock_gettime, sys_minus_one},
+  {SYS_nanosleep, sys_linux_nanosleep},
+  {SYS_clock_gettime, sys_linux_clock_gettime},
+  {SYS_sched_yield, sys_linux_sched_yield},
   {SYS_kill, sys_kill},
-  {131, sys_zero},                     // tgkill
-  {SYS_rt_sigaction, sys_zero},
-  {SYS_rt_sigprocmask, sys_zero},
-  {143, sys_zero},                     // setregid
-  {144, sys_zero},                     // setgid
-  {145, sys_zero},                     // setreuid
-  {146, sys_zero},                     // setuid
+  {SYS_tgkill, sys_linux_success},
+  {SYS_rt_sigaction, sys_linux_success},
+  {SYS_rt_sigprocmask, sys_linux_success},
+  {SYS_setregid, sys_linux_success},
+  {SYS_setgid, sys_linux_success},
+  {SYS_setreuid, sys_linux_success},
+  {SYS_setuid, sys_linux_success},
+  {SYS_times, sys_linux_times},
   {SYS_uname, sys_linux_uname},
+  {SYS_gettimeofday, sys_linux_gettimeofday},
   {SYS_getpid, sys_getpid},
   {SYS_getppid, sys_linux_getppid},
-  {SYS_getuid, sys_zero},
-  {SYS_geteuid, sys_zero},
-  {SYS_getgid, sys_zero},
-  {SYS_getegid, sys_zero},
+  {SYS_getuid, sys_linux_success},
+  {SYS_geteuid, sys_linux_success},
+  {SYS_getgid, sys_linux_success},
+  {SYS_getegid, sys_linux_success},
   {SYS_gettid, sys_linux_gettid},
   {SYS_brk, sys_linux_brk},
   {SYS_munmap, sys_munmap},
   {SYS_clone, sys_linux_clone},
   {SYS_execve, sys_linux_execve},
   {SYS_mmap, sys_linux_mmap},
-  {SYS_mprotect, sys_zero},
+  {SYS_mprotect, sys_linux_success},
   {SYS_wait4, sys_linux_wait4},
-  {SYS_prlimit64, sys_minus_one},
+  {SYS_prlimit64, sys_linux_unsupported},
   {SYS_getrandom, sys_linux_getrandom},
+};
 
-  //just for memory xv6 lab
+static struct syscall_entry xv6_syscalls[] = {
   {SYS_sbrk, sys_sbrk},
   {SYS_pause, sys_pause},
   {SYS_uptime, sys_uptime},
@@ -221,9 +240,13 @@ static struct syscall_entry syscall_table[] = {
 
 static uint64 (*syscall_lookup(int num))(void)
 {
-  for(int i = 0; i < NELEM(syscall_table); i++){
-    if(syscall_table[i].num == num)
-      return syscall_table[i].fn;
+  for(int i = 0; i < NELEM(linux_syscalls); i++){
+    if(linux_syscalls[i].num == num)
+      return linux_syscalls[i].fn;
+  }
+  for(int i = 0; i < NELEM(xv6_syscalls); i++){
+    if(xv6_syscalls[i].num == num)
+      return xv6_syscalls[i].fn;
   }
   return 0;
 }

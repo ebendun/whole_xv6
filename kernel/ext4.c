@@ -532,6 +532,74 @@ ext4_path_is_reg(int dev, const char *path)
   return ext4_inode_mode_is_reg(&inode);
 }
 
+int
+ext4_stat_by_path(int dev, const char *path, uint64 *mode, uint64 *size, uint64 *ino)
+{
+  struct ext4_inode inode;
+
+  if(ext4_lookup_path(dev, path, &inode) < 0)
+    return -1;
+  if(mode)
+    *mode = get_u16((uchar *)&inode.i_mode);
+  if(size)
+    *size = ext4_inode_size(&inode);
+  if(ino)
+    *ino = 0;
+  return 0;
+}
+
+int
+ext4_dirent_by_path(int dev, const char *path, uint64 off, uint64 *next,
+                    uint64 *ino, uchar *type, char *name, int namesz)
+{
+  struct ext4_inode dir;
+  uint64 dir_size;
+
+  if(namesz <= 0)
+    return -1;
+  if(ext4_lookup_path(dev, path, &dir) < 0)
+    return -1;
+  if(!ext4_inode_mode_is_dir(&dir))
+    return -1;
+
+  dir_size = ext4_inode_size(&dir);
+  while(off + 8 <= dir_size){
+    struct ext4_dir_entry_header hdr;
+    uint32 ent_ino;
+    uint16 rec_len;
+    uint8 name_len;
+
+    if(ext4_read_data(dev, &dir, (uchar *)&hdr, sizeof(hdr), (uint32)off) != sizeof(hdr))
+      return -1;
+    ent_ino = get_u32((uchar *)&hdr.inode);
+    rec_len = get_u16((uchar *)&hdr.rec_len);
+    name_len = hdr.name_len;
+    if(rec_len < 8 || off + rec_len > dir_size)
+      return -1;
+
+    if(ent_ino != 0 && name_len > 0 && name_len < 255){
+      int n = name_len;
+      if(n >= namesz)
+        n = namesz - 1;
+      if(ext4_read_data(dev, &dir, (uchar *)name, n, (uint32)off + 8) != n)
+        return -1;
+      name[n] = 0;
+      if(next)
+        *next = off + rec_len;
+      if(ino)
+        *ino = ent_ino;
+      if(type)
+        *type = hdr.file_type;
+      return 1;
+    }
+    off += rec_len;
+  }
+
+  if(next)
+    *next = off;
+  return 0;
+}
+
 static int
 ext4_name_has_suffix(const char *name, const char *suffix)
 {
@@ -700,6 +768,19 @@ resolve_ext4_path(char *path, char *out, int outsz)
   struct proc *p = myproc();
 
   if(path[0] == '/'){
+    if(strncmp(path, "/lib/", 5) == 0){
+      char aliased[MAXPATH];
+      snprintf(aliased, sizeof(aliased), "/glibc%s", path);
+      if(ext4_path_is_reg(FIRSTDEV, aliased) || ext4_path_is_dir(FIRSTDEV, aliased)){
+        safestrcpy(out, aliased, outsz);
+        return 1;
+      }
+      snprintf(aliased, sizeof(aliased), "/musl%s", path);
+      if(ext4_path_is_reg(FIRSTDEV, aliased) || ext4_path_is_dir(FIRSTDEV, aliased)){
+        safestrcpy(out, aliased, outsz);
+        return 1;
+      }
+    }
     ext4_join_path(out, outsz, "/", path);
     return 1;
   }

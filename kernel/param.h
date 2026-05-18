@@ -1,7 +1,7 @@
 #define NPROC        64  // maximum number of processes
 #define NCPU          8  // maximum number of CPUs
-#define NOFILE       16  // open files per process
-#define NFILE       100  // open files per system
+#define NOFILE      128  // open files per process
+#define NFILE       256  // open files per system
 #define NINODE       50  // maximum number of active i-nodes
 #define NDEV         10  // maximum major device number
 #define FIRSTDEV      1  // xv6 ext4 device number of file system root disk
@@ -15,4 +15,3 @@
 #define USERSTACK    2     // user stack pages
 #define NVMA 16            // user vma
 #define SUPERPGNUM 16       // the num of super page
-

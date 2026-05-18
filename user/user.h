@@ -61,6 +61,7 @@ int __sys_mkdirat(int, const char*, int);
 int __sys_chdir(const char*);
 int __sys_dup(int);
 int __sys_getpid(void);
+int __sys_getdents64(int, void*, int);
 uint64 __sys_brk(uint64);
 char* __sys_sbrk(int,int);
 int __sys_pause(int);

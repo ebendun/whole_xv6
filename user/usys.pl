@@ -36,6 +36,7 @@ entry("mkdirat");
 entry("chdir");
 entry("dup");
 entry("getpid");
+entry("getdents64");
 entry("brk");
 entry("sbrk");
 entry("pause");

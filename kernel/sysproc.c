@@ -57,12 +57,10 @@ sys_wait(void)
 uint64
 sys_linux_wait4(void)
 {
-  int options;
   uint64 status;
 
-  argint(2, &options);
   argaddr(1, &status);
-  return kwait_options(status, options);
+  return kwait_linux(status);
 }
 
 uint64
@@ -188,6 +186,88 @@ sys_linux_getrandom(void)
     done += n;
   }
   return len;
+}
+
+uint64
+sys_linux_gettimeofday(void)
+{
+  uint64 addr;
+  uint64 tv[2];
+
+  argaddr(0, &addr);
+  acquire(&tickslock.l);
+  tv[0] = ticks / 10;
+  tv[1] = (ticks % 10) * 100000;
+  release(&tickslock.l);
+  if(copyout(myproc()->pagetable, addr, (char *)tv, sizeof(tv)) < 0)
+    return -1;
+  return 0;
+}
+
+uint64
+sys_linux_clock_gettime(void)
+{
+  uint64 addr;
+  uint64 ts[2];
+
+  argaddr(1, &addr);
+  acquire(&tickslock.l);
+  ts[0] = ticks / 10;
+  ts[1] = (ticks % 10) * 100000000;
+  release(&tickslock.l);
+  if(copyout(myproc()->pagetable, addr, (char *)ts, sizeof(ts)) < 0)
+    return -1;
+  return 0;
+}
+
+uint64
+sys_linux_times(void)
+{
+  uint64 addr;
+  uint64 tms[4] = {0, 0, 0, 0};
+  uint64 now;
+
+  argaddr(0, &addr);
+  acquire(&tickslock.l);
+  now = ticks;
+  release(&tickslock.l);
+  if(addr && copyout(myproc()->pagetable, addr, (char *)tms, sizeof(tms)) < 0)
+    return -1;
+  return now;
+}
+
+uint64
+sys_linux_sched_yield(void)
+{
+  yield();
+  return 0;
+}
+
+uint64
+sys_linux_nanosleep(void)
+{
+  uint64 addr;
+  uint64 ts[2];
+  uint target, start;
+
+  argaddr(0, &addr);
+  if(copyin(myproc()->pagetable, (char *)ts, addr, sizeof(ts)) < 0)
+    return -1;
+  target = ts[0] * 10 + (ts[1] + 99999999) / 100000000;
+  if(target == 0)
+    return 0;
+
+  acquire(&tickslock.l);
+  start = ticks;
+  while(ticks - start < target){
+    if(killed(myproc())){
+      release(&tickslock.l);
+      return -1;
+    }
+    sleep(&ticks, &tickslock.l);
+  }
+  release(&tickslock.l);
+  return 0;
 }
 
 uint64
