@@ -506,7 +506,8 @@ sys_open(void)
   if((omode & O_CREATE) == 0){
     char epath[MAXPATH];
     //judge the file wether in ext4 or not
-    if(resolve_ext4_path(path, epath, sizeof(epath)) &&
+    if(strncmp(path, "/", 2) != 0 &&
+       resolve_ext4_path(path, epath, sizeof(epath)) &&
        (ext4_path_is_reg(FIRSTDEV, epath) || ext4_path_is_dir(FIRSTDEV, epath))){
       if(omode & (O_WRONLY | O_RDWR))
         return -1;
@@ -611,7 +612,8 @@ sys_linux_openat(void)
   omode = linux_open_flags(flags);
   if((omode & O_CREATE) == 0){
     char epath[MAXPATH];
-    if(resolve_ext4_path(path, epath, sizeof(epath)) &&
+    if(strncmp(path, "/", 2) != 0 &&
+       resolve_ext4_path(path, epath, sizeof(epath)) &&
        (ext4_path_is_reg(FIRSTDEV, epath) || ext4_path_is_dir(FIRSTDEV, epath))){
       if(omode & (O_WRONLY | O_RDWR))
         return -1;

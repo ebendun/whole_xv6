@@ -64,7 +64,19 @@ kill(int pid)
 int
 exec(const char *path, char **argv)
 {
-  return __sys_execve(path, argv, 0);
+  char binpath[64];
+  int i;
+
+  if(__sys_execve(path, argv, 0) == 0)
+    return 0;
+
+  if(path[0] == '/' || strchr(path, '/') || strlen(path) + 6 >= sizeof(binpath))
+    return -1;
+
+  strcpy(binpath, "/bin/");
+  i = strlen(binpath);
+  strcpy(binpath + i, path);
+  return __sys_execve(binpath, argv, 0);
 }
 
 static int

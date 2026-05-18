@@ -3,6 +3,8 @@
 #include "kernel/types.h"
 #include "user/user.h"
 #include "kernel/fcntl.h"
+#include "kernel/fs.h"
+#include "kernel/stat.h"
 
 // Parsed command representation
 #define EXEC  1
@@ -12,6 +14,15 @@
 #define BACK  5
 
 #define MAXARGS 10
+#define HISTMAX 16
+
+struct linux_dirent64 {
+  uint64 d_ino;
+  uint64 d_off;
+  ushort d_reclen;
+  uchar d_type;
+  char d_name[1];
+};
 
 struct cmd {
   int type;
@@ -53,6 +64,148 @@ int fork1(void);  // Fork but panics on failure.
 void panic(char*);
 struct cmd *parsecmd(char*);
 void runcmd(struct cmd*) __attribute__((noreturn));
+
+static char history[HISTMAX][100];
+static int nhistory;
+
+int
+hasprefix(char *s, char *prefix)
+{
+  while(*prefix){
+    if(*s++ != *prefix++)
+      return 0;
+  }
+  return 1;
+}
+
+void
+redraw(char *buf, int len)
+{
+  write(2, "\r$ ", 3);
+  if(len > 0)
+    write(2, buf, len);
+  write(2, "\033[K", 3);
+}
+
+void
+remember(char *buf)
+{
+  int len, i;
+
+  len = strlen(buf);
+  if(len > 0 && buf[len-1] == '\n')
+    len--;
+  if(len == 0)
+    return;
+  if(nhistory > 0 && strlen(history[nhistory-1]) == len &&
+     memcmp(history[nhistory-1], buf, len) == 0)
+    return;
+  if(nhistory == HISTMAX){
+    for(i = 1; i < HISTMAX; i++)
+      strcpy(history[i-1], history[i]);
+    nhistory--;
+  }
+  memmove(history[nhistory], buf, len);
+  history[nhistory][len] = 0;
+  nhistory++;
+}
+
+int
+match_dir(char *dir, char *prefix, char *match, int msz)
+{
+  char dbuf[512];
+  int fd, nread, bpos, nmatch;
+
+  nmatch = 0;
+  fd = open(dir, O_RDONLY);
+  if(fd < 0)
+    return 0;
+  while((nread = __sys_getdents64(fd, dbuf, sizeof(dbuf))) > 0){
+    for(bpos = 0; bpos < nread; ){
+      struct linux_dirent64 *d = (struct linux_dirent64 *)(dbuf + bpos);
+      bpos += d->d_reclen;
+      if(d->d_ino == 0 || d->d_name[0] == '.')
+        continue;
+      if(hasprefix(d->d_name, prefix)){
+        if(nmatch == 0){
+          if(strlen(d->d_name) < msz)
+            strcpy(match, d->d_name);
+        } else {
+          if(nmatch == 1)
+            write(2, "\n", 1);
+          write(2, d->d_name, strlen(d->d_name));
+          write(2, "  ", 2);
+        }
+        nmatch++;
+      }
+    }
+  }
+  close(fd);
+  if(nmatch > 1)
+    write(2, "\n", 1);
+  return nmatch;
+}
+
+void
+complete(char *buf, int *len, int nbuf)
+{
+  char dir[64], prefix[64], match[64];
+  int start, slash, i, nmatch, oldlen;
+
+  start = *len;
+  while(start > 0 && buf[start-1] != ' ' && buf[start-1] != '\t')
+    start--;
+
+  slash = -1;
+  for(i = start; i < *len; i++){
+    if(buf[i] == '/')
+      slash = i;
+  }
+
+  if(slash >= 0){
+    oldlen = slash - start;
+    if(oldlen == 0){
+      strcpy(dir, "/");
+    } else if(oldlen < sizeof(dir)){
+      memmove(dir, buf + start, oldlen);
+      dir[oldlen] = 0;
+    } else {
+      return;
+    }
+    oldlen = *len - slash - 1;
+    if(oldlen >= sizeof(prefix))
+      return;
+    memmove(prefix, buf + slash + 1, oldlen);
+    prefix[oldlen] = 0;
+  } else {
+    oldlen = *len - start;
+    if(oldlen >= sizeof(prefix))
+      return;
+    memmove(prefix, buf + start, oldlen);
+    prefix[oldlen] = 0;
+    if(start == 0)
+      strcpy(dir, "/bin");
+    else
+      strcpy(dir, ".");
+  }
+
+  match[0] = 0;
+  nmatch = match_dir(dir, prefix, match, sizeof(match));
+  if(nmatch == 1){
+    oldlen = strlen(prefix);
+    for(i = oldlen; match[i] && *len < nbuf - 2; i++){
+      buf[(*len)++] = match[i];
+      write(2, &match[i], 1);
+    }
+    if(*len < nbuf - 2){
+      buf[(*len)++] = ' ';
+      write(2, " ", 1);
+    }
+    buf[*len] = 0;
+  } else if(nmatch > 1) {
+    redraw(buf, *len);
+  }
+}
 
 int
 looks_elf(char *path)
@@ -183,11 +336,78 @@ runcmd(struct cmd *cmd)
 int
 getcmd(char *buf, int nbuf)
 {
-  write(2, "$ ", 2);
+  char c;
+  int len, nav;
+
   memset(buf, 0, nbuf);
-  gets(buf, nbuf);
-  if(buf[0] == 0) // EOF
-    return -1;
+  len = 0;
+  nav = nhistory;
+  write(2, "$ ", 2);
+  for(;;){
+    if(read(0, &c, 1) != 1)
+      return -1;
+    if(c == 4)
+      return -1;
+    if(c == '\n' || c == '\r'){
+      write(2, "\n", 1);
+      if(len < nbuf - 1)
+        buf[len++] = '\n';
+      buf[len] = 0;
+      remember(buf);
+      return 0;
+    }
+    if(c == '\t'){
+      complete(buf, &len, nbuf);
+      nav = nhistory;
+      continue;
+    }
+    if(c == 21){
+      len = 0;
+      buf[0] = 0;
+      redraw(buf, len);
+      nav = nhistory;
+      continue;
+    }
+    if(c == 8 || c == 127){
+      if(len > 0){
+        len--;
+        buf[len] = 0;
+        write(2, "\b \b", 3);
+      }
+      nav = nhistory;
+      continue;
+    }
+    if(c == '\033'){
+      char seq[2];
+      if(read(0, &seq[0], 1) != 1 || read(0, &seq[1], 1) != 1)
+        continue;
+      if(seq[0] == '[' && seq[1] == 'A' && nhistory > 0){
+        if(nav > 0)
+          nav--;
+        strcpy(buf, history[nav]);
+        len = strlen(buf);
+        redraw(buf, len);
+      } else if(seq[0] == '[' && seq[1] == 'B' && nhistory > 0){
+        if(nav < nhistory)
+          nav++;
+        if(nav == nhistory){
+          len = 0;
+          buf[0] = 0;
+        } else {
+          strcpy(buf, history[nav]);
+          len = strlen(buf);
+        }
+        redraw(buf, len);
+      }
+      continue;
+    }
+    if(c >= ' ' && c < 0x7f && len < nbuf - 2){
+      buf[len++] = c;
+      buf[len] = 0;
+      write(2, &c, 1);
+      nav = nhistory;
+    }
+  }
   return 0;
 }
 
@@ -224,7 +444,7 @@ main(int argc, char *argv[])
   }
 
   // Ensure that three file descriptors are open.
-  while((fd = open("console", O_RDWR)) >= 0){
+  while((fd = open("/dev/console", O_RDWR)) >= 0){
     if(fd >= 3){
       close(fd);
       break;

@@ -9,18 +9,19 @@
 #include "user/user.h"
 #include "kernel/fcntl.h"
 
-char *argv[] = { "sh", 0 };
+char *argv[] = { "/bin/sh", 0 };
 
 int
 main(void)
 {
   int pid, wpid;
 
-  if(open("console", O_RDWR) < 0){
-    mknod("console", CONSOLE, 0);
-    mknod("statistics", STATS, 0);
-    open("console", O_RDWR);
-  }
+  if(open("/dev/console", O_RDWR) < 0){
+    mkdir("/dev");
+    mknod("/dev/console", CONSOLE, 0);
+    mknod("/dev/statistics", STATS, 0);
+    open("/dev/console", O_RDWR);
+  } 
   dup(0);  // stdout
   dup(0);  // stderr
 
@@ -32,7 +33,7 @@ main(void)
       exit(1);
     }
     if(pid == 0){
-      exec("sh", argv);
+      exec("/bin/sh", argv);
       printf("init: exec sh failed\n");
       exit(1);
     }

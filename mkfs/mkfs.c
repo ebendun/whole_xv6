@@ -39,8 +39,13 @@ void winode(uint, struct dinode*);
 void rinode(uint inum, struct dinode *ip);
 void rsect(uint sec, void *buf);
 uint ialloc(ushort type);
+uint iallocdev(ushort major, ushort minor);
 void iappend(uint inum, void *p, int n);
 void die(const char *);
+uint mkdentry(uint parent, char *name);
+uint mkfile(uint parent, char *hostpath, char *name);
+uint mkdevnode(uint parent, char *name, ushort major, ushort minor);
+void adddirent(uint dirino, char *name, uint inum);
 
 // convert to riscv byte order
 ushort
@@ -68,8 +73,8 @@ xint(uint x)
 int
 main(int argc, char *argv[])
 {
-  int i, cc, fd;
-  uint rootino, inum, off;
+  int i;
+  uint rootino, binino, devino, homeino, off;
   struct dirent de;
   char buf[BSIZE];
   struct dinode din;
@@ -127,6 +132,12 @@ main(int argc, char *argv[])
   strcpy(de.name, "..");
   iappend(rootino, &de, sizeof(de));
 
+  binino = mkdentry(rootino, "bin");
+  devino = mkdentry(rootino, "dev");
+  homeino = mkdentry(rootino, "home");
+  mkdevnode(devino, "console", 1, 0);
+  mkdevnode(devino, "statistics", 2, 0);
+
   for(i = 2; i < argc; i++){
     // get rid of "user/"
     char *shortname;
@@ -135,31 +146,16 @@ main(int argc, char *argv[])
     else
       shortname = argv[i];
     
-    assert(index(shortname, '/') == 0);
-
-    if((fd = open(argv[i], 0)) < 0)
-      die(argv[i]);
-
     // Skip leading _ in name when writing to file system.
     // The binaries are named _rm, _cat, etc. to keep the
     // build operating system from trying to execute them
     // in place of system binaries like rm and cat.
-    if(shortname[0] == '_')
+    if(shortname[0] == '_'){
       shortname += 1;
-
-    assert(strlen(shortname) <= DIRSIZ);
-    
-    inum = ialloc(T_FILE);
-
-    bzero(&de, sizeof(de));
-    de.inum = xshort(inum);
-    strncpy(de.name, shortname, DIRSIZ);
-    iappend(rootino, &de, sizeof(de));
-
-    while((cc = read(fd, buf, sizeof(buf))) > 0)
-      iappend(inum, buf, cc);
-
-    close(fd);
+      mkfile(binino, argv[i], shortname);
+    } else {
+      mkfile(homeino, argv[i], shortname);
+    }
   }
 
   // fix size of root inode dir
@@ -172,6 +168,63 @@ main(int argc, char *argv[])
   balloc(freeblock);
 
   exit(0);
+}
+
+void
+adddirent(uint dirino, char *name, uint inum)
+{
+  struct dirent de;
+
+  assert(strlen(name) <= DIRSIZ);
+  bzero(&de, sizeof(de));
+  de.inum = xshort(inum);
+  strncpy(de.name, name, DIRSIZ);
+  iappend(dirino, &de, sizeof(de));
+}
+
+uint
+mkdentry(uint parent, char *name)
+{
+  uint inum;
+
+  inum = ialloc(T_DIR);
+  adddirent(parent, name, inum);
+  adddirent(inum, ".", inum);
+  adddirent(inum, "..", parent);
+  return inum;
+}
+
+uint
+mkfile(uint parent, char *hostpath, char *name)
+{
+  int fd, cc;
+  uint inum;
+  char buf[BSIZE];
+
+  assert(index(name, '/') == 0);
+  assert(strlen(name) <= DIRSIZ);
+
+  if((fd = open(hostpath, 0)) < 0)
+    die(hostpath);
+
+  inum = ialloc(T_FILE);
+  adddirent(parent, name, inum);
+
+  while((cc = read(fd, buf, sizeof(buf))) > 0)
+    iappend(inum, buf, cc);
+
+  close(fd);
+  return inum;
+}
+
+uint
+mkdevnode(uint parent, char *name, ushort major, ushort minor)
+{
+  uint inum;
+
+  inum = iallocdev(major, minor);
+  adddirent(parent, name, inum);
+  return inum;
 }
 
 void
@@ -227,6 +280,22 @@ ialloc(ushort type)
 
   bzero(&din, sizeof(din));
   din.type = xshort(type);
+  din.nlink = xshort(1);
+  din.size = xint(0);
+  winode(inum, &din);
+  return inum;
+}
+
+uint
+iallocdev(ushort major, ushort minor)
+{
+  uint inum = freeinode++;
+  struct dinode din;
+
+  bzero(&din, sizeof(din));
+  din.type = xshort(T_DEVICE);
+  din.major = xshort(major);
+  din.minor = xshort(minor);
   din.nlink = xshort(1);
   din.size = xint(0);
   winode(inum, &din);
