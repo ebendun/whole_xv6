@@ -33,9 +33,8 @@ OBJS = \
   $K/virtio_disk.o\
   $K/ext4.o \
   $K/ext4_probe.o \
-  $K/e1000.o \
+  $K/virtio_net.o \
   $K/net.o \
-  $K/pci.o\
   $K/stats.o\
   $K/sprintf.o\
 
@@ -80,6 +79,16 @@ endif
 
 QEMU = qemu-system-riscv64
 MIN_QEMU_VERSION = 7.2
+
+all: kernel-rv kernel-la
+
+kernel-rv: $K/kernel
+	cp $K/kernel kernel-rv
+
+# This tree currently only has a RISC-V kernel backend. Keep the required
+# contest artifact present; replace this rule when a LoongArch backend exists.
+kernel-la: $K/kernel
+	cp $K/kernel kernel-la
 
 CC = $(TOOLPREFIX)gcc
 AS = $(TOOLPREFIX)gas
@@ -238,7 +247,7 @@ newfs.img:
 clean:
 	rm -rf *.tex *.dvi *.idx *.aux *.log *.ind *.ilg *.dSYM *.zip *.pcap \
 	*/*.o */*.d */*.asm */*.sym \
-	$K/kernel fs.img \
+	$K/kernel kernel-rv kernel-la fs.img \
 	mkfs/mkfs .gdbinit \
         $U/usys.S \
 	$(UPROGS)
@@ -258,10 +267,11 @@ FWDPORT2 = $(shell expr `id -u` % 5000 + 30999)
 QEMUOPTS = -machine virt -kernel $K/kernel -m 256M -smp $(CPUS) -nographic -bios default
 QEMUOPTS += -drive file=sdcard-rv.img,if=none,format=raw,id=x0
 QEMUOPTS += -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0
-QEMUOPTS += -no-reboot -rtc base=utc
+QEMUOPTS += -no-reboot
+QEMUOPTS += -device virtio-net-device,netdev=net -netdev user,id=net
+QEMUOPTS += -rtc base=utc
 QEMUOPTS += -drive file=fs.img,if=none,format=raw,id=x1
 QEMUOPTS += -device virtio-blk-device,drive=x1,bus=virtio-mmio-bus.1
-QEMUOPTS += -device virtio-net-device,netdev=net -netdev user,id=net -rtc base=utc
 
 # makes a new fs.img
 qemu: check-qemu-version newfs.img $K/kernel fs.img

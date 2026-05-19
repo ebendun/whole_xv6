@@ -13,7 +13,7 @@
 #define LIST  4
 #define BACK  5
 
-#define MAXARGS 10
+#define MAXARGS 64
 #define HISTMAX 16
 
 struct linux_dirent64 {
@@ -85,6 +85,16 @@ redraw(char *buf, int len)
   if(len > 0)
     write(2, buf, len);
   write(2, "\033[K", 3);
+}
+
+void
+redraw_at(char *buf, int len, int pos)
+{
+  int i;
+
+  redraw(buf, len);
+  for(i = len; i > pos; i--)
+    write(2, "\b", 1);
 }
 
 void
@@ -337,10 +347,11 @@ int
 getcmd(char *buf, int nbuf)
 {
   char c;
-  int len, nav;
+  int len, pos, nav;
 
   memset(buf, 0, nbuf);
   len = 0;
+  pos = 0;
   nav = nhistory;
   write(2, "$ ", 2);
   for(;;){
@@ -349,6 +360,8 @@ getcmd(char *buf, int nbuf)
     if(c == 4)
       return -1;
     if(c == '\n' || c == '\r'){
+      if(pos < len)
+        redraw_at(buf, len, len);
       write(2, "\n", 1);
       if(len < nbuf - 1)
         buf[len++] = '\n';
@@ -358,21 +371,27 @@ getcmd(char *buf, int nbuf)
     }
     if(c == '\t'){
       complete(buf, &len, nbuf);
+      pos = len;
       nav = nhistory;
       continue;
     }
     if(c == 21){
       len = 0;
+      pos = 0;
       buf[0] = 0;
       redraw(buf, len);
       nav = nhistory;
       continue;
     }
     if(c == 8 || c == 127){
-      if(len > 0){
+      if(pos > 0){
+        int i;
+        for(i = pos - 1; i < len - 1; i++)
+          buf[i] = buf[i + 1];
         len--;
+        pos--;
         buf[len] = 0;
-        write(2, "\b \b", 3);
+        redraw_at(buf, len, pos);
       }
       nav = nhistory;
       continue;
@@ -386,25 +405,45 @@ getcmd(char *buf, int nbuf)
           nav--;
         strcpy(buf, history[nav]);
         len = strlen(buf);
+        pos = len;
         redraw(buf, len);
       } else if(seq[0] == '[' && seq[1] == 'B' && nhistory > 0){
         if(nav < nhistory)
           nav++;
         if(nav == nhistory){
           len = 0;
+          pos = 0;
           buf[0] = 0;
         } else {
           strcpy(buf, history[nav]);
           len = strlen(buf);
+          pos = len;
         }
         redraw(buf, len);
+      } else if(seq[0] == '[' && seq[1] == 'C'){
+        if(pos < len){
+          write(2, "\033[C", 3);
+          pos++;
+        }
+      } else if(seq[0] == '[' && seq[1] == 'D'){
+        if(pos > 0){
+          write(2, "\b", 1);
+          pos--;
+        }
       }
       continue;
     }
     if(c >= ' ' && c < 0x7f && len < nbuf - 2){
-      buf[len++] = c;
+      int i;
+      for(i = len; i > pos; i--)
+        buf[i] = buf[i - 1];
+      buf[pos++] = c;
+      len++;
       buf[len] = 0;
-      write(2, &c, 1);
+      if(pos == len)
+        write(2, &c, 1);
+      else
+        redraw_at(buf, len, pos);
       nav = nhistory;
     }
   }

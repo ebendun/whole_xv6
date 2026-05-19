@@ -61,6 +61,8 @@ static struct disk {
   struct virtio_blk_req ops[NUM];
 
   struct spinlock vdisk_lock;
+  uint64 base;
+  int inited;
 
 } disks[VDISKS];
 
@@ -70,22 +72,26 @@ static int vdisk_inited = 0;
 void
 virtio_disk_init(void)
 {
-  uint32 status = 0;
-
   // initialize per-device structures
   vdisk_inited = 0;
-  for(int devidx = 0; devidx < VDISKS; devidx++){
-    uint64 base = VIRTIO0 + devidx * VIRTIO_STEP;
-    struct disk *d = &disks[devidx];
-    initlock(&d->vdisk_lock, "virtio_disk");
+  for(int i = 0; i < VDISKS; i++)
+    initlock(&disks[i].vdisk_lock, "virtio_disk");
+
+  for(int slot = 0; slot < VIRTIO_COUNT && vdisk_inited < VDISKS; slot++){
+    uint64 base = VIRTIO0 + slot * VIRTIO_STEP;
 
     uint32 magic = *(volatile uint32*)(base + VIRTIO_MMIO_MAGIC_VALUE);
     uint32 version = *(volatile uint32*)(base + VIRTIO_MMIO_VERSION);
     uint32 device_id = *(volatile uint32*)(base + VIRTIO_MMIO_DEVICE_ID);
     uint32 vendor = *(volatile uint32*)(base + VIRTIO_MMIO_VENDOR_ID);
-    if(magic != 0x74726976 || (version != 1 && version != 2) || device_id != 2 || vendor != 0x554d4551){
-      panic("could not find virtio disk");
-    }
+    if(magic != 0x74726976 || (version != 1 && version != 2) ||
+       device_id != 2 || vendor != 0x554d4551)
+      continue;
+
+    struct disk *d = &disks[vdisk_inited];
+    d->base = base;
+    d->inited = 1;
+    uint32 status = 0;
 
     // reset device
     *(volatile uint32*)(base + VIRTIO_MMIO_STATUS) = status;
@@ -266,7 +272,9 @@ virtio_disk_rw(struct buf *b, int write)
   if(b->dev >= 1 && b->dev <= VDISKS)
     devidx = (int)b->dev - 1;
   struct disk *d = &disks[devidx];
-  uint64 base = VIRTIO0 + devidx * VIRTIO_STEP;
+  if(d->inited == 0)
+    panic("virtio_disk_rw: disk not present");
+  uint64 base = d->base;
 
   acquire(&d->vdisk_lock);
 
@@ -350,8 +358,10 @@ virtio_disk_intr()
   // handle interrupts for all initialized virtio devices
   for(int devidx = 0; devidx < VDISKS; devidx++){
     struct disk *d = &disks[devidx];
+    if(d->inited == 0)
+      continue;
 
-    uint64 base = VIRTIO0 + devidx * VIRTIO_STEP;
+    uint64 base = d->base;
 
     acquire(&d->vdisk_lock);
 

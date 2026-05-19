@@ -250,7 +250,7 @@ sys_send(void)
     return -1;
   }
 
-  if(e1000_transmit(buf, total) < 0){
+  if(virtio_net_transmit(buf, total) < 0){
     kfree(buf);
     return -1;
   }
@@ -342,7 +342,7 @@ arp_rx(char *inbuf)
   memmove(arp->tha, ineth->shost, ETHADDR_LEN);
   arp->tip = inarp->sip;
 
-  e1000_transmit(buf, sizeof(*eth) + sizeof(*arp));
+  virtio_net_transmit(buf, sizeof(*eth) + sizeof(*arp));
 
   kfree(inbuf);
 }

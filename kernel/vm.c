@@ -19,6 +19,88 @@ pagetable_t kernel_pagetable;
 extern char etext[];  // kernel.ld sets this to end of kernel code.
 
 extern char trampoline[]; // trampoline.S
+extern struct proc proc[NPROC];
+
+static struct proc *
+linux_vm_leader(struct proc *p)
+{
+  while(p && p->linux_share_vm && p->parent)
+    p = p->parent;
+  return p;
+}
+
+static int
+linux_same_vm_group(struct proc *a, struct proc *b)
+{
+  if(a == 0 || b == 0)
+    return 0;
+  return linux_vm_leader(a) == linux_vm_leader(b);
+}
+
+static int
+linux_addr_in_proc(struct proc *p, uint64 a)
+{
+  if(a < p->sz)
+    return 1;
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used &&
+       a >= p->vmas[i].addr &&
+       a < p->vmas[i].addr + p->vmas[i].len)
+      return 1;
+  }
+  return 0;
+}
+
+static uint64
+linux_shared_fault_page(struct proc *p, uint64 a, int *perm)
+{
+  for(struct proc *q = proc; q < &proc[NPROC]; q++){
+    if(q == p || q->state == UNUSED || q->pagetable == 0)
+      continue;
+    if(!linux_same_vm_group(p, q))
+      continue;
+    pte_t *pte = walk(q->pagetable, a, 0);
+    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
+      continue;
+    *perm = PTE_FLAGS(*pte);
+    return PTE2PA(*pte);
+  }
+  return 0;
+}
+
+static void
+linux_map_fault_page_to_group(struct proc *p, uint64 a, uint64 pa, int perm)
+{
+  for(struct proc *q = proc; q < &proc[NPROC]; q++){
+    if(q == p || q->state == UNUSED || q->pagetable == 0)
+      continue;
+    if(!linux_same_vm_group(p, q) || !linux_addr_in_proc(q, a))
+      continue;
+    if(walkaddr(q->pagetable, a) == 0 &&
+       mappages(q->pagetable, a, PGSIZE, pa, perm) == 0)
+      kref_inc(pa);
+  }
+}
+
+static void
+linux_replace_cow_page_in_group(struct proc *p, uint64 a, uint64 oldpa,
+                                uint64 newpa, int perm)
+{
+  for(struct proc *q = proc; q < &proc[NPROC]; q++){
+    if(q->state == UNUSED || q->pagetable == 0)
+      continue;
+    if(!linux_same_vm_group(p, q))
+      continue;
+    pte_t *qpte = walk(q->pagetable, a, 0);
+    if(qpte == 0 || (*qpte & PTE_V) == 0 || PTE2PA(*qpte) != oldpa)
+      continue;
+    *qpte = PA2PTE(newpa) | perm;
+    if(q != p)
+      kref_inc(newpa);
+    kfree((void *)oldpa);
+  }
+  sfence_vma();
+}
 
 // Make a direct-map page table for the kernel.
 pagetable_t
@@ -32,17 +114,9 @@ kvmmake(void)
   // uart registers
   kvmmap(kpgtbl, UART0, UART0, PGSIZE, PTE_R | PTE_W);
 
-  // ext4  virtio mmio disk interface
-  kvmmap(kpgtbl, VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
-  
-  // init xv6 fs virtio mmio disk interface
-  kvmmap(kpgtbl, VIRTIO1, VIRTIO1, PGSIZE, PTE_R | PTE_W);
-
-  // PCI-E ECAM (configuration space), for pci.c
-  kvmmap(kpgtbl, 0x30000000L, 0x30000000L, 0x10000000, PTE_R | PTE_W);
-
-  // pci.c maps the e1000's registers here.
-  kvmmap(kpgtbl, 0x40000000L, 0x40000000L, 0x20000, PTE_R | PTE_W);
+  // virtio mmio interfaces.
+  for(uint64 va = VIRTIO0; va < VIRTIO0 + VIRTIO_COUNT * PGSIZE; va += PGSIZE)
+    kvmmap(kpgtbl, va, va, PGSIZE, PTE_R | PTE_W);
 
   // PLIC
   kvmmap(kpgtbl, PLIC, PLIC, 0x4000000, PTE_R | PTE_W);
@@ -524,6 +598,53 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
   return -1;
 }
 
+// Copy user mappings into a child page table while keeping the underlying
+// physical pages shared and writable. Used for Linux CLONE_VM threads.
+int
+uvmshare(pagetable_t old, pagetable_t new, uint64 sz)
+{
+  pte_t *pte;
+  uint64 pa, i;
+  uint flags;
+  int szinc = PGSIZE;
+
+  for(i = 0; i < sz; i += szinc){
+    int level = 0;
+    if((pte = walk_with_level(old, i, 0, &level)) == 0)
+      continue;
+
+    if((*pte & PTE_V) == 0)
+      continue;
+
+    if(level == 1 && PTE_LEAF(*pte)){
+      if((i % SUPERPGSIZE) != 0)
+        panic("uvmshare: unaligned superpage");
+      pa = PTE2PA(*pte);
+      flags = PTE_FLAGS(*pte);
+      pte_t *npte = walk_to_level(new, i, 1, 1);
+      if(npte == 0 || (*npte & PTE_V))
+        goto err;
+      *npte = PA2PTE(pa) | flags | PTE_V;
+      superref_inc(pa);
+      szinc = SUPERPGSIZE;
+      continue;
+    }
+
+    szinc = PGSIZE;
+    pa = PTE2PA(*pte);
+    flags = PTE_FLAGS(*pte);
+    if(mappages(new, i, PGSIZE, pa, flags) != 0)
+      goto err;
+    kref_inc(pa);
+  }
+  sfence_vma();
+  return 0;
+
+ err:
+  uvmunmap(new, 0, i / PGSIZE, 1);
+  return -1;
+}
+
 // mark a PTE invalid for user access.
 // used by exec for the user stack guard page.
 void
@@ -545,14 +666,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 {
   uint64 n, va0, pa0;
   pte_t *pte;
-  struct proc *p = myproc();
-  uint64 psz;
-
-  if(p == 0)
-    return -1;
-
-  psz = (pagetable == p->pagetable) ? p->sz : MAXVA;
-  if(dstva >= psz || len > psz - dstva)
+  if(dstva >= MAXVA || len > MAXVA - dstva)
     return -1;
 
   while(len > 0){
@@ -562,7 +676,7 @@ copyout(pagetable_t pagetable, uint64 dstva, char *src, uint64 len)
 
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0) {
-      if((pa0 = vmfault(pagetable, va0, 1)) == 0) {
+      if((pa0 = vmfault(pagetable, va0, 0)) == 0) {
         return -1;
       }
     }
@@ -596,21 +710,14 @@ int
 copyin(pagetable_t pagetable, char *dst, uint64 srcva, uint64 len)
 {
   uint64 n, va0, pa0;
-  struct proc *p = myproc();
-  uint64 psz;
-
-  if(p == 0)
-    return -1;
-
-  psz = (pagetable == p->pagetable) ? p->sz : MAXVA;
-  if(srcva >= psz || len > psz - srcva)
+  if(srcva >= MAXVA || len > MAXVA - srcva)
     return -1;
   
   while(len > 0){
     va0 = PGROUNDDOWN(srcva);
     pa0 = walkaddr(pagetable, va0);
     if(pa0 == 0) {
-      if((pa0 = vmfault(pagetable, va0, 0)) == 0) {
+      if((pa0 = vmfault(pagetable, va0, 1)) == 0) {
         return -1;
       }
     }
@@ -635,23 +742,18 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 {
   uint64 n, va0, pa0;
   int got_null = 0;
-  struct proc *p = myproc();
-  uint64 psz;
-
-  if(p == 0)
-    return -1;
-
-  psz = (pagetable == p->pagetable) ? p->sz : MAXVA;
-  if(srcva >= psz)
+  if(srcva >= MAXVA)
     return -1;
 
   while(got_null == 0 && max > 0){
     va0 = PGROUNDDOWN(srcva);
-    if(va0 >= psz)
+    if(va0 >= MAXVA)
       return -1;
     pa0 = walkaddr(pagetable, va0);
-    if(pa0 == 0)
-      return -1;
+    if(pa0 == 0){
+      if((pa0 = vmfault(pagetable, va0, 1)) == 0)
+        return -1;
+    }
     n = PGSIZE - (srcva - va0);
     if(n > max)
       n = max;
@@ -759,10 +861,26 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
       memmove((void *)mem, (void *)pa, PGSIZE);
       uint flags = PTE_FLAGS(*pte);
       flags = (flags | PTE_W) & ~PTE_COW;
+      if(p->linux_share_vm){
+        linux_replace_cow_page_in_group(p, va, pa, mem, flags);
+        return mem;
+      }
       *pte = PA2PTE(mem) | flags;
       sfence_vma();
       kfree((void *)pa);
       return mem;
+    }
+    if(!read && ((*pte & PTE_W) == 0)){
+      for(int i = 0; i < NVMA; i++){
+        if(p->vmas[i].used &&
+           a >= p->vmas[i].addr &&
+           a < p->vmas[i].addr + p->vmas[i].len &&
+           (p->vmas[i].prot & PROT_WRITE)){
+          *pte = *pte | PTE_W;
+          sfence_vma();
+          return PTE2PA(*pte);
+        }
+      }
     }
     return 0;
   }
@@ -779,20 +897,37 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
     }
   }
 
-  mem = (uint64)kalloc();
-  if(mem == 0)
-    return 0;
-  memset((void*)mem, 0, PGSIZE);
-
   if(v){
     if(read && (v->prot & PROT_READ) == 0){
-      kfree((void*)mem);
       return 0;
     }
     if(!read && (v->prot & PROT_WRITE) == 0){
-      kfree((void*)mem);
       return 0;
     }
+
+    int perm = PTE_U;
+    if(v->prot & PROT_READ)
+      perm |= PTE_R;
+    if(v->prot & PROT_WRITE)
+      perm |= PTE_W;
+    if(v->prot & PROT_EXEC)
+      perm |= PTE_X;
+
+    if(p->linux_share_vm){
+      int shared_perm = 0;
+      uint64 shared = linux_shared_fault_page(p, a, &shared_perm);
+      if(shared != 0){
+        if(mappages(p->pagetable, a, PGSIZE, shared, shared_perm) != 0)
+          return 0;
+        kref_inc(shared);
+        return shared;
+      }
+    }
+
+    mem = (uint64)kalloc();
+    if(mem == 0)
+      return 0;
+    memset((void*)mem, 0, PGSIZE);
 
     if(v->f){
       uint64 off = v->offset + (a - v->addr);
@@ -811,30 +946,41 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
       }
     }
 
-    int perm = PTE_U;
-    if(v->prot & PROT_READ)
-      perm |= PTE_R;
-    if(v->prot & PROT_WRITE)
-      perm |= PTE_W;
-    if(v->prot & PROT_EXEC)
-      perm |= PTE_X;
-
     if(mappages(p->pagetable, a, PGSIZE, mem, perm) != 0){
       kfree((void*)mem);
       return 0;
     }
+    if(p->linux_share_vm)
+      linux_map_fault_page_to_group(p, a, mem, perm);
     return mem;
   }
 
   if(a >= p->sz){
-    kfree((void*)mem);
     return 0;
   }
+
+  if(p->linux_share_vm){
+    int shared_perm = 0;
+    uint64 shared = linux_shared_fault_page(p, a, &shared_perm);
+    if(shared != 0){
+      if(mappages(p->pagetable, a, PGSIZE, shared, shared_perm) != 0)
+        return 0;
+      kref_inc(shared);
+      return shared;
+    }
+  }
+
+  mem = (uint64)kalloc();
+  if(mem == 0)
+    return 0;
+  memset((void*)mem, 0, PGSIZE);
 
   if(mappages(p->pagetable, a, PGSIZE, mem, PTE_W|PTE_U|PTE_R) != 0) {
     kfree((void*)mem);
     return 0;
   }
+  if(p->linux_share_vm)
+    linux_map_fault_page_to_group(p, a, mem, PTE_W|PTE_U|PTE_R);
   return mem;
 }
 

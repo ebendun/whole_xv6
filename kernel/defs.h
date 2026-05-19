@@ -22,6 +22,8 @@ void            bunpin(struct buf*);
 
 // console.c
 void            consoleinit(void);
+void            devnullinit(void);
+void            devzeroinit(void);
 void            consoleintr(int);
 void            consputc(int);
 
@@ -92,6 +94,13 @@ void            backtrace(void);
 int             cpuid(void);
 void            kexit(int);
 int             kfork(void);
+int             kclone(uint64, uint64, uint64, int, int);
+void            linux_futex_wake(uint64);
+void            linux_interrupt(int, int, int);
+void            linux_set_sigcancel_handler(uint64);
+void            linux_deliver_signal(void);
+uint64          linux_sigreturn(void);
+int             linux_take_interrupt(void);
 int             growproc(int);
 void            proc_mapstacks(pagetable_t);
 pagetable_t     proc_pagetable(struct proc *);
@@ -186,6 +195,7 @@ pagetable_t     uvmcreate(void);
 uint64          uvmalloc(pagetable_t, uint64, uint64, int);
 uint64          uvmdealloc(pagetable_t, uint64, uint64);
 int             uvmcopy(pagetable_t, pagetable_t, uint64);
+int             uvmshare(pagetable_t, pagetable_t, uint64);
 void            uvmfree(pagetable_t, uint64);
 void            uvmunmap(pagetable_t, uint64, uint64, int);
 void            uvmclear(pagetable_t, uint64);
@@ -240,13 +250,10 @@ int             snprintf(char*, unsigned long, const char*, ...);
 void            kcsaninit();
 #endif
 
-// pci.c
-void            pci_init();
-
-// e1000.c
-void            e1000_init(uint32 *);
-void            e1000_intr(void);
-int             e1000_transmit(char *, int);
+// virtio_net.c
+void            virtio_net_init(void);
+void            virtio_net_intr(void);
+int             virtio_net_transmit(char *, int);
 
 // net.c
 void            netinit(void);

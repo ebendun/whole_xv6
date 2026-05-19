@@ -12,6 +12,8 @@ main()
 {
   if(__sync_bool_compare_and_swap(&started, 0, 1)){
     consoleinit();
+    devnullinit();
+    devzeroinit();
     statsinit();
     printfinit();
     printf("\n");
@@ -33,7 +35,7 @@ main()
     iinit();         // inode table
     fileinit();      // file table
     virtio_disk_init(); // emulated hard disk
-    pci_init();
+    virtio_net_init();
     netinit();
     userinit();      // first user process
     start_other_harts();

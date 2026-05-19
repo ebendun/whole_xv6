@@ -34,6 +34,7 @@ filealloc(void)
   acquire(&ftable.lock);
   for(f = ftable.file; f < ftable.file + NFILE; f++){
     if(f->ref == 0){
+      memset(f, 0, sizeof(*f));
       f->ref = 1;
       release(&ftable.lock);
       return f;

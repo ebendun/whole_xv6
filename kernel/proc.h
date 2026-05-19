@@ -112,11 +112,20 @@ struct proc {
   uint64 kstack;               // Virtual address of kernel stack
   uint64 sz;                   // Size of process memory (bytes)
   int is_linux;                // Process is running a Linux ABI image
+  int linux_signal_pending;    // Linux-ABI signal interrupt for blocking syscalls
+  int linux_pending_signal;    // Linux signal to deliver before user return
+  int linux_pending_sender;    // Sender pid for pending Linux signal
+  int linux_in_signal;         // currently running a Linux signal handler
+  int linux_share_vm;          // Linux CLONE_VM-style shared user memory
+  int linux_share_files;       // Linux CLONE_FILES-style shared fd table
+  uint64 linux_sigcancel_handler; // handler installed for Linux SIGCANCEL
+  uint64 linux_sigmask;        // Linux blocked signal mask
   uint64 linux_brk;            // Current Linux ABI program break
   uint64 linux_brk_limit;      // Highest Linux brk before the stack guard
   pagetable_t pagetable;       // User page table
   struct trapframe *trapframe; // data page for trampoline.S
   struct usyscall *usyscall;   // shared user/kernel page
+  char *sigreturn;             // user executable rt_sigreturn stub
   struct trapframe alarm_trapframe; // saved user registers for sigalarm
   int alarm_interval;          // ticks between alarms
   int alarm_ticks;             // ticks since last alarm
@@ -133,4 +142,5 @@ struct proc {
   struct cpu *pincpu;
   uint64 mmap_base;            // next mmap allocation address (grows down)
   struct vma vmas[NVMA];
+  uint64 clear_child_tid;      // Linux CLONE_CHILD_CLEARTID futex address
 };

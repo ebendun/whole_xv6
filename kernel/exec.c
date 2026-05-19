@@ -38,33 +38,36 @@ exec_script(char *script, char *hdr, char **argv)
   int j = 0;
   int n = 0;
   int ret;
-
-  if(hdr[0] != '#' || hdr[1] != '!')
-    return -1;
+  int has_shebang = hdr[0] == '#' && hdr[1] == '!';
 
   se = (struct script_exec *)kalloc();
   if(se == 0)
     return -1;
   memset(se, 0, sizeof(*se));
 
-  while(hdr[i] == ' ' || hdr[i] == '\t')
-    i++;
-  while(hdr[i] && hdr[i] != '\n' && hdr[i] != '\r' &&
-        hdr[i] != ' ' && hdr[i] != '\t' && j < sizeof(se->interp) - 1)
-    se->interp[j++] = hdr[i++];
-  se->interp[j] = 0;
-  if(se->interp[0] == 0){
-    kfree(se);
-    return -1;
-  }
+  if(has_shebang){
+    while(hdr[i] == ' ' || hdr[i] == '\t')
+      i++;
+    while(hdr[i] && hdr[i] != '\n' && hdr[i] != '\r' &&
+          hdr[i] != ' ' && hdr[i] != '\t' && j < sizeof(se->interp) - 1)
+      se->interp[j++] = hdr[i++];
+    se->interp[j] = 0;
+    if(se->interp[0] == 0){
+      kfree(se);
+      return -1;
+    }
 
-  while(hdr[i] == ' ' || hdr[i] == '\t')
-    i++;
-  j = 0;
-  while(hdr[i] && hdr[i] != '\n' && hdr[i] != '\r' &&
-        hdr[i] != ' ' && hdr[i] != '\t' && j < sizeof(se->iarg) - 1)
-    se->iarg[j++] = hdr[i++];
-  se->iarg[j] = 0;
+    while(hdr[i] == ' ' || hdr[i] == '\t')
+      i++;
+    j = 0;
+    while(hdr[i] && hdr[i] != '\n' && hdr[i] != '\r' &&
+          hdr[i] != ' ' && hdr[i] != '\t' && j < sizeof(se->iarg) - 1)
+      se->iarg[j++] = hdr[i++];
+    se->iarg[j] = 0;
+  } else {
+    safestrcpy(se->interp, "/bin/sh", sizeof(se->interp));
+    safestrcpy(se->iarg, "sh", sizeof(se->iarg));
+  }
 
   if((strncmp(se->interp, "/bin/sh", 7) == 0 && se->interp[7] == 0) ||
      (strncmp(se->interp, "/bin/busybox", 12) == 0 && se->interp[12] == 0) ||
@@ -378,7 +381,7 @@ kexec(char *path, char **argv)
   p->pagetable = pagetable;
   p->sz = sz;
   p->is_linux = is_ext4;
-  p->mmap_base = USYSCALL;
+  p->mmap_base = USIGRETURN;
   p->trapframe->epc = entry;  // initial program counter
   p->trapframe->sp = sp; // initial stack pointer
   proc_freepagetable(oldpagetable, oldsz);

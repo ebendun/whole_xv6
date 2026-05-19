@@ -20,8 +20,11 @@ main(void)
     mkdir("/dev");
     mknod("/dev/console", CONSOLE, 0);
     mknod("/dev/statistics", STATS, 0);
+    mknod("/dev/null", DEVNULL, 0);
+    mknod("/dev/zero", DEVZERO, 0);
     open("/dev/console", O_RDWR);
   } 
+  mkdir("/dev/shm");
   dup(0);  // stdout
   dup(0);  // stderr
 

@@ -95,6 +95,7 @@ extern uint64 sys_pause(void);
 extern uint64 sys_uptime(void);
 extern uint64 sys_write(void);
 extern uint64 sys_close(void);
+extern uint64 sys_linux_close(void);
 extern uint64 sys_interpose(void);
 extern uint64 sys_pgpte(void);
 extern uint64 sys_kpgtbl(void);
@@ -111,7 +112,11 @@ extern uint64 sys_linux_openat(void);
 extern uint64 sys_linux_fstat(void);
 extern uint64 sys_linux_getdents64(void);
 extern uint64 sys_linux_writev(void);
+extern uint64 sys_linux_readv(void);
+extern uint64 sys_linux_lseek(void);
+extern uint64 sys_linux_pread64(void);
 extern uint64 sys_linux_mmap(void);
+extern uint64 sys_linux_mprotect(void);
 extern uint64 sys_linux_newfstatat(void);
 extern uint64 sys_linux_brk(void);
 extern uint64 sys_linux_gettid(void);
@@ -133,6 +138,7 @@ extern uint64 sys_linux_mknodat(void);
 extern uint64 sys_linux_mkdirat(void);
 extern uint64 sys_linux_unlinkat(void);
 extern uint64 sys_linux_linkat(void);
+extern uint64 sys_linux_renameat(void);
 extern uint64 sys_linux_mount(void);
 extern uint64 sys_linux_faccessat(void);
 extern uint64 sys_linux_readlinkat(void);
@@ -141,17 +147,34 @@ extern uint64 sys_linux_clock_gettime(void);
 extern uint64 sys_linux_times(void);
 extern uint64 sys_linux_sched_yield(void);
 extern uint64 sys_linux_nanosleep(void);
+extern uint64 sys_linux_syslog(void);
+extern uint64 sys_linux_sysinfo(void);
+extern uint64 sys_linux_ioctl(void);
+extern uint64 sys_linux_rt_sigtimedwait(void);
+extern uint64 sys_linux_rt_sigaction(void);
+extern uint64 sys_linux_rt_sigprocmask(void);
+extern uint64 sys_linux_rt_sigreturn(void);
+extern uint64 sys_linux_tgkill(void);
+extern uint64 sys_linux_tkill(void);
+extern uint64 sys_linux_prlimit64(void);
+extern uint64 sys_linux_setsid(void);
+extern uint64 sys_linux_statfs(void);
+extern uint64 sys_linux_futex(void);
+extern uint64 sys_linux_utimensat(void);
+extern uint64 sys_linux_socket(void);
+extern uint64 sys_linux_bind(void);
+extern uint64 sys_linux_listen(void);
+extern uint64 sys_linux_accept(void);
+extern uint64 sys_linux_connect(void);
+extern uint64 sys_linux_getsockname(void);
+extern uint64 sys_linux_sendto(void);
+extern uint64 sys_linux_recvfrom(void);
+extern uint64 sys_linux_setsockopt(void);
 
 static uint64
 sys_linux_success(void)
 {
   return 0;
-}
-
-static uint64
-sys_linux_unsupported(void)
-{
-  return -1;
 }
 
 struct syscall_entry {
@@ -164,44 +187,55 @@ static struct syscall_entry linux_syscalls[] = {
   {SYS_dup, sys_dup},
   {SYS_dup3, sys_linux_dup3},
   {SYS_fcntl, sys_linux_fcntl},
-  {SYS_ioctl, sys_linux_unsupported},
+  {SYS_ioctl, sys_linux_ioctl},
   {SYS_mknodat, sys_linux_mknodat},
   {SYS_mkdirat, sys_linux_mkdirat},
   {SYS_unlinkat, sys_linux_unlinkat},
   {SYS_linkat, sys_linux_linkat},
+  {SYS_renameat, sys_linux_renameat},
   {SYS_umount2, sys_linux_success},
   {SYS_mount, sys_linux_mount},
   {SYS_faccessat, sys_linux_faccessat},
   {SYS_chdir, sys_chdir},
   {SYS_openat, sys_linux_openat},
-  {SYS_close, sys_close},
+  {SYS_close, sys_linux_close},
   {SYS_pipe2, sys_linux_pipe2},
   {SYS_getdents64, sys_linux_getdents64},
+  {SYS_lseek, sys_linux_lseek},
   {SYS_read, sys_read},
   {SYS_write, sys_write},
+  {SYS_readv, sys_linux_readv},
   {SYS_writev, sys_linux_writev},
+  {SYS_pread64, sys_linux_pread64},
   {SYS_sendfile, sys_linux_sendfile},
   {SYS_ppoll, sys_linux_ppoll},
   {SYS_readlinkat, sys_linux_readlinkat},
   {SYS_newfstatat, sys_linux_newfstatat},
   {SYS_fstat, sys_linux_fstat},
+  {SYS_utimensat, sys_linux_utimensat},
   {SYS_exit, sys_exit},
   {SYS_exit_group, sys_linux_exit_group},
   {SYS_set_tid_address, sys_linux_set_tid_address},
-  {SYS_futex, sys_linux_unsupported},
+  {SYS_futex, sys_linux_futex},
   {SYS_set_robust_list, sys_linux_set_robust_list},
+  {SYS_get_robust_list, sys_linux_success},
   {SYS_nanosleep, sys_linux_nanosleep},
   {SYS_clock_gettime, sys_linux_clock_gettime},
+  {SYS_syslog, sys_linux_syslog},
   {SYS_sched_yield, sys_linux_sched_yield},
   {SYS_kill, sys_kill},
-  {SYS_tgkill, sys_linux_success},
-  {SYS_rt_sigaction, sys_linux_success},
-  {SYS_rt_sigprocmask, sys_linux_success},
+  {SYS_rt_sigreturn, sys_linux_rt_sigreturn},
+  {SYS_tkill, sys_linux_tkill},
+  {SYS_tgkill, sys_linux_tgkill},
+  {SYS_rt_sigaction, sys_linux_rt_sigaction},
+  {SYS_rt_sigprocmask, sys_linux_rt_sigprocmask},
+  {SYS_rt_sigtimedwait, sys_linux_rt_sigtimedwait},
   {SYS_setregid, sys_linux_success},
   {SYS_setgid, sys_linux_success},
   {SYS_setreuid, sys_linux_success},
   {SYS_setuid, sys_linux_success},
   {SYS_times, sys_linux_times},
+  {SYS_setsid, sys_linux_setsid},
   {SYS_uname, sys_linux_uname},
   {SYS_gettimeofday, sys_linux_gettimeofday},
   {SYS_getpid, sys_getpid},
@@ -211,14 +245,26 @@ static struct syscall_entry linux_syscalls[] = {
   {SYS_getgid, sys_linux_success},
   {SYS_getegid, sys_linux_success},
   {SYS_gettid, sys_linux_gettid},
+  {SYS_sysinfo, sys_linux_sysinfo},
+  {SYS_socket, sys_linux_socket},
+  {SYS_bind_linux, sys_linux_bind},
+  {SYS_listen, sys_linux_listen},
+  {SYS_accept, sys_linux_accept},
+  {SYS_connect, sys_linux_connect},
+  {SYS_getsockname, sys_linux_getsockname},
+  {SYS_sendto, sys_linux_sendto},
+  {SYS_recvfrom, sys_linux_recvfrom},
+  {SYS_setsockopt, sys_linux_setsockopt},
   {SYS_brk, sys_linux_brk},
   {SYS_munmap, sys_munmap},
   {SYS_clone, sys_linux_clone},
   {SYS_execve, sys_linux_execve},
   {SYS_mmap, sys_linux_mmap},
-  {SYS_mprotect, sys_linux_success},
+  {SYS_mprotect, sys_linux_mprotect},
   {SYS_wait4, sys_linux_wait4},
-  {SYS_prlimit64, sys_linux_unsupported},
+  {SYS_prlimit64, sys_linux_prlimit64},
+  {SYS_statfs, sys_linux_statfs},
+  {SYS_renameat2, sys_linux_renameat},
   {SYS_getrandom, sys_linux_getrandom},
 };
 
@@ -260,7 +306,10 @@ syscall(void)
 
   num = p->trapframe->a7;
   if((fn = syscall_lookup(num)) != 0) {
-    p->trapframe->a0 = fn();
+    uint64 r = fn();
+    if(r == (uint64)-1 && strncmp(p->name, "entry-static.ex", 15) == 0)
+      printf("trace syscall %d -> -1\n", num);
+    p->trapframe->a0 = r;
   } else {
     printf("%d %s: unknown linux sys call %d\n",
             p->pid, p->name, num);

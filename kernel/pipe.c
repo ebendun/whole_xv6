@@ -86,6 +86,10 @@ pipewrite(struct pipe *pi, uint64 addr, int n)
       release(&pi->lock);
       return -1;
     }
+    if(linux_take_interrupt()){
+      release(&pi->lock);
+      return -4; // EINTR
+    }
     if(pi->nwrite == pi->nread + PIPESIZE){ //DOC: pipewrite-full
       wakeup(&pi->nread);
       sleep(&pi->nwrite, &pi->lock);
@@ -115,6 +119,10 @@ pipewrite_kernel(struct pipe *pi, char *buf, int n)
       release(&pi->lock);
       return -1;
     }
+    if(linux_take_interrupt()){
+      release(&pi->lock);
+      return -4; // EINTR
+    }
     if(pi->nwrite == pi->nread + PIPESIZE){
       wakeup(&pi->nread);
       sleep(&pi->nwrite, &pi->lock);
@@ -140,6 +148,10 @@ piperead(struct pipe *pi, uint64 addr, int n)
     if(killed(pr)){
       release(&pi->lock);
       return -1;
+    }
+    if(linux_take_interrupt()){
+      release(&pi->lock);
+      return -4; // EINTR
     }
     sleep(&pi->nread, &pi->lock); //DOC: piperead-sleep
   }

@@ -80,6 +80,9 @@ usertrap(void)
   if(killed(p))
     kexit(-1);
 
+  if(p->linux_pending_signal)
+    linux_deliver_signal();
+
   if(which_dev == 2){
     if(p->alarm_interval > 0 && p->alarm_inflight == 0){
       p->alarm_ticks++;
@@ -207,15 +210,10 @@ devintr()
 
     if(irq == UART0_IRQ){
       uartintr();
-    } else if(irq == VIRTIO0_IRQ){
+    } else if(irq >= VIRTIO0_IRQ && irq < VIRTIO0_IRQ + VIRTIO_COUNT){
       virtio_disk_intr();
-    } else if(irq == VIRTIO1_IRQ){
-      virtio_disk_intr();
-    }
-    else if(irq == E1000_IRQ){
-      e1000_intr();
-    }
-    else if(irq){
+      virtio_net_intr();
+    } else if(irq){
       printf("unexpected interrupt irq=%d\n", irq);
     }
 
@@ -234,4 +232,3 @@ devintr()
     return 0;
   }
 }
-

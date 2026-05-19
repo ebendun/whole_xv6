@@ -25,12 +25,15 @@
 // first virtio mmio interface (for ext4 fs)
 #define VIRTIO0 0x10001000
 #define VIRTIO0_IRQ 1
+#define VIRTIO_COUNT 8
 
 // second virtio mmio interface (for xv6 fs)
 #define VIRTIO1 (VIRTIO0 + 0x1000)
 #define VIRTIO1_IRQ 2
 
-#define E1000_IRQ 33
+// third virtio mmio interface (for virtio-net)
+#define VIRTIO2 (VIRTIO0 + 0x2000)
+#define VIRTIO2_IRQ 3
 
 // qemu puts platform-level interrupt controller (PLIC) here.
 #define PLIC 0x0c000000L
@@ -66,6 +69,7 @@
 //   TRAMPOLINE (the same page as in the kernel)
 #define TRAPFRAME (TRAMPOLINE - PGSIZE)
 #define USYSCALL (TRAPFRAME - PGSIZE)
+#define USIGRETURN (USYSCALL - PGSIZE)
 
 #ifndef __ASSEMBLER__
 struct usyscall {

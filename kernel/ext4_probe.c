@@ -11,6 +11,6 @@ void ext4_init(void)
     printf("ext4: no ext4 filesystem on device %d or unsupported format\n", FIRSTDEV);
     return;
   }
-  printf("ext4: detected ext4 on device %d\n", FIRSTDEV);
-  ext4_list_root(FIRSTDEV);
+  //printf("ext4: detected ext4 on device %d\n", FIRSTDEV);
+  //ext4_list_root(FIRSTDEV);
 }

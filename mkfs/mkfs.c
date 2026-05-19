@@ -44,6 +44,7 @@ void iappend(uint inum, void *p, int n);
 void die(const char *);
 uint mkdentry(uint parent, char *name);
 uint mkfile(uint parent, char *hostpath, char *name);
+uint mkfiledata(uint parent, char *name, char *data);
 uint mkdevnode(uint parent, char *name, ushort major, ushort minor);
 void adddirent(uint dirino, char *name, uint inum);
 
@@ -74,7 +75,7 @@ int
 main(int argc, char *argv[])
 {
   int i;
-  uint rootino, binino, devino, homeino, off;
+  uint rootino, binino, devino, homeino, procino, miscino, off;
   struct dirent de;
   char buf[BSIZE];
   struct dinode din;
@@ -135,8 +136,16 @@ main(int argc, char *argv[])
   binino = mkdentry(rootino, "bin");
   devino = mkdentry(rootino, "dev");
   homeino = mkdentry(rootino, "home");
+  procino = mkdentry(rootino, "proc");
+  mkdentry(rootino, "tmp");
+  miscino = mkdentry(devino, "misc");
   mkdevnode(devino, "console", 1, 0);
   mkdevnode(devino, "statistics", 2, 0);
+  mkdevnode(devino, "null", 3, 0);
+  mkdevnode(devino, "zero", 4, 0);
+  mkdevnode(miscino, "rtc", 3, 0);
+  mkfiledata(procino, "mounts", "rootfs / rootfs rw 0 0\n");
+  mkfiledata(procino, "meminfo", "MemTotal:       262144 kB\nMemFree:        131072 kB\n");
 
   for(i = 2; i < argc; i++){
     // get rid of "user/"
@@ -214,6 +223,20 @@ mkfile(uint parent, char *hostpath, char *name)
     iappend(inum, buf, cc);
 
   close(fd);
+  return inum;
+}
+
+uint
+mkfiledata(uint parent, char *name, char *data)
+{
+  uint inum;
+
+  assert(index(name, '/') == 0);
+  assert(strlen(name) <= DIRSIZ);
+
+  inum = ialloc(T_FILE);
+  adddirent(parent, name, inum);
+  iappend(inum, data, strlen(data));
   return inum;
 }
 
