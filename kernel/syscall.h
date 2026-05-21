@@ -1,4 +1,5 @@
 // Linux RISC-V syscall numbers used by both xv6 and Linux ABI programs.
+#define SYS_getcwd    17
 #define SYS_dup       23
 #define SYS_dup3      24
 #define SYS_fcntl     25

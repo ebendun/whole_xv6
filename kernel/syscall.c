@@ -183,7 +183,7 @@ struct syscall_entry {
 };
 
 static struct syscall_entry linux_syscalls[] = {
-  {17, sys_linux_getcwd},
+  {SYS_getcwd, sys_linux_getcwd},
   {SYS_dup, sys_dup},
   {SYS_dup3, sys_linux_dup3},
   {SYS_fcntl, sys_linux_fcntl},
@@ -306,10 +306,7 @@ syscall(void)
 
   num = p->trapframe->a7;
   if((fn = syscall_lookup(num)) != 0) {
-    uint64 r = fn();
-    if(r == (uint64)-1 && strncmp(p->name, "entry-static.ex", 15) == 0)
-      printf("trace syscall %d -> -1\n", num);
-    p->trapframe->a0 = r;
+    p->trapframe->a0 = fn();
   } else {
     printf("%d %s: unknown linux sys call %d\n",
             p->pid, p->name, num);

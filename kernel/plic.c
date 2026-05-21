@@ -24,7 +24,9 @@ plicinithart(void)
   int hart = cpuid();
   
   // set enable bits for this hart's S-mode.
+  //enable uart
   uint32 mask = (1 << UART0_IRQ);
+  //enable two mmio and a net
   for(int irq = VIRTIO0_IRQ; irq < VIRTIO0_IRQ + VIRTIO_COUNT; irq++)
     mask |= (1 << irq);
   *(uint32*)PLIC_SENABLE(hart) = mask;

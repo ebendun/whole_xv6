@@ -241,7 +241,7 @@ sys_dup(void)
   if(argfd(0, 0, &f) < 0)
     return -1;
   if((fd=fdalloc(f)) < 0)
-    return -1;
+    return myproc()->is_linux ? -24 : -1;
   filedup(f);
   return fd;
 }
@@ -1198,6 +1198,7 @@ sys_linux_openat(void)
   uint64 mode;
   struct file *f;
   struct inode *ip;
+  struct proc *p = myproc();
 
   argint(0, &dirfd);
   argint(2, &flags);
@@ -1205,6 +1206,15 @@ sys_linux_openat(void)
   if(argstr(1, path, MAXPATH) < 0)
     return -1;
   (void)dirfd;
+  int has_fd = 0;
+  for(int i = 0; i < NOFILE; i++){
+    if(p->ofile[i] == 0){
+      has_fd = 1;
+      break;
+    }
+  }
+  if(has_fd == 0)
+    return -24; // EMFILE
   omode = linux_open_flags(flags);
   if((omode & O_CREATE) == 0){
     char epath[MAXPATH];

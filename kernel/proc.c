@@ -836,9 +836,14 @@ kexit(int status)
 
   if(p->clear_child_tid != 0){
     int zero = 0;
-    copyout(p->pagetable, p->clear_child_tid, (char *)&zero, sizeof(zero));
-    if(p->parent)
-      copyout(p->parent->pagetable, p->clear_child_tid, (char *)&zero, sizeof(zero));
+    uint64 pa = walkaddr(p->pagetable, p->clear_child_tid);
+    if(pa != 0)
+      memmove((void *)pa, &zero, sizeof(zero));
+    if(p->parent){
+      pa = walkaddr(p->parent->pagetable, p->clear_child_tid);
+      if(pa != 0)
+        memmove((void *)pa, &zero, sizeof(zero));
+    }
     linux_futex_wake(p->clear_child_tid);
   }
 
@@ -1169,6 +1174,48 @@ sleep(void *chan, struct spinlock *lk)
   // Reacquire original lock.
   release(&p->lock);
   acquire(lk);
+}
+
+int
+futex_timed_sleep(void *chan, struct spinlock *lk, uint deadline)
+{
+  struct proc *p = myproc();
+  int timedout;
+
+  acquire(&p->lock);
+  release(lk);
+
+  p->chan = chan;
+  p->futex_deadline = deadline;
+  p->futex_timedout = 0;
+  p->state = SLEEPING;
+
+  sched();
+
+  timedout = p->futex_timedout;
+  p->chan = 0;
+  p->futex_deadline = 0;
+  p->futex_timedout = 0;
+
+  release(&p->lock);
+  acquire(lk);
+  return timedout;
+}
+
+void
+futex_tick(uint now)
+{
+  struct proc *p;
+
+  for(p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->state == SLEEPING && p->futex_deadline != 0 &&
+       now - p->futex_deadline < 0x80000000U){
+      p->futex_timedout = 1;
+      p->state = RUNNABLE;
+    }
+    release(&p->lock);
+  }
 }
 
 // Wake up all processes sleeping on channel chan.

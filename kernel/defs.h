@@ -22,10 +22,12 @@ void            bunpin(struct buf*);
 
 // console.c
 void            consoleinit(void);
-void            devnullinit(void);
-void            devzeroinit(void);
 void            consoleintr(int);
 void            consputc(int);
+
+// devzero.c
+void            devnullinit(void);
+void            devzeroinit(void);
 
 // exec.c
 int             kexec(char*, char**);
@@ -116,6 +118,8 @@ void            procinit(void);
 void            scheduler(void) __attribute__((noreturn));
 void            sched(void);
 void            sleep(void*, struct spinlock*);
+int             futex_timed_sleep(void*, struct spinlock*, uint);
+void            futex_tick(uint);
 void            userinit(void);
 int             kwait(uint64);
 int             kwait_options(uint64, int);
@@ -137,8 +141,6 @@ void            release(struct spinlock*);
 void            push_off(void);
 void            pop_off(void);
 int             atomic_read4(int *addr);
-void            freelock(struct spinlock*);
-void            spinlockinit(void);
 void            initrwlock(struct rwspinlock *rwlk);
 void            read_acquire(struct rwspinlock*);
 void            read_release(struct rwspinlock*);
@@ -177,6 +179,8 @@ void            prepare_return(void);
 
 // start.c
 void            timerinit(void);
+
+// sbi.c
 void            start_other_harts(void);
 
 // uart.c
@@ -238,10 +242,6 @@ void            ext4_join_path(char *out, int outsz, char *cwd, char *path);
 int             resolve_ext4_path(char *path, char *out, int outsz);
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
-
-// stats.c
-void            statsinit(void);
-void            statsinc(void);
 
 // sprintf.c
 int             snprintf(char*, unsigned long, const char*, ...);

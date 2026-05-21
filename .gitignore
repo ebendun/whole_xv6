@@ -13,6 +13,8 @@ initcode.out
 kernelmemfs
 mkfs/mkfs
 kernel/kernel
+kernel-la
+kernel-rv
 user/usys.S
 .gdbinit
 *.zip

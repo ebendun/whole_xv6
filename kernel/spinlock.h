@@ -5,8 +5,6 @@ struct spinlock {
   // For debugging:
   char *name;        // Name of lock.
   struct cpu *cpu;   // The cpu holding the lock.
-  int nts;
-  int n;          //num of who want to heve spinlock
 };
 
 // Reader-writer lock.

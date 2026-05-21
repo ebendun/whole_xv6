@@ -48,7 +48,7 @@ if sys.argv[1] == "txone":
         print("txone: unexpected payload %s" % (buf0))
 elif sys.argv[1] == "rxone":
     #
-    # send a single UDP packet to xv6 to test e1000_recv().
+    # send a single UDP packet to xv6 to test packet receive.
     # should result in arp_rx() printing
     #   arp_rx: received an ARP packet
     # and ip_rx() printing
@@ -145,8 +145,8 @@ elif sys.argv[1] == "grade":
     sock.bind(('127.0.0.1', SERVERPORT))
 
     # first, listen for a single UDP packet sent by xv6,
-    # in order to test only e1000_transmit(), in a situation
-    # where perhaps e1000_recv() has not yet been implemented.
+    # in order to test only packet transmit, in a situation
+    # where perhaps packet receive has not yet been implemented.
     buf, raddr = sock.recvfrom(4096)
     if buf == b'txone':
         print("txone: OK")
@@ -156,7 +156,7 @@ elif sys.argv[1] == "grade":
     sys.stderr.flush()
 
     # second, send a single UDP packet, to test
-    # e1000_recv() -- received by user/nettest.c's rxone().
+    # received by user/nettest.c's rxone().
     print("rxone: sending one UDP packet")
     sock1 = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock1.sendto(b'rxone', ("127.0.0.1", FWDPORT2))

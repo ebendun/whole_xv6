@@ -4,22 +4,21 @@
 #include "riscv.h"
 #include "defs.h"
 
+volatile static int booted = 0;
 volatile static int started = 0;
 
 // start() jumps here in supervisor mode on all CPUs.
 void
 main()
 {
-  if(__sync_bool_compare_and_swap(&started, 0, 1)){
+  if(__sync_bool_compare_and_swap(&booted, 0, 1)){
     consoleinit();
     devnullinit();
     devzeroinit();
-    statsinit();
     printfinit();
     printf("\n");
     printf("xv6 kernel is booting\n");
     printf("\n");
-    spinlockinit();  // bootstrap lock table
     kinit();         // physical page allocator
     kvminit();       // create kernel page table
     kvminithart();   // turn on paging

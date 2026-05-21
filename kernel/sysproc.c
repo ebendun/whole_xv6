@@ -12,6 +12,7 @@
 
 static struct spinlock futex_lock;
 static int futex_lock_inited;
+extern struct proc proc[NPROC];
 
 static void
 futex_init(void)
@@ -27,8 +28,132 @@ linux_futex_wake(uint64 uaddr)
 {
   futex_init();
   acquire(&futex_lock);
-  wakeup((void *)uaddr);
+  for(struct proc *p = proc; p < &proc[NPROC]; p++){
+    if(p == myproc())
+      continue;
+    acquire(&p->lock);
+    if(p->state == SLEEPING && p->chan == (void *)uaddr)
+      p->state = RUNNABLE;
+    release(&p->lock);
+  }
   release(&futex_lock);
+}
+
+static int
+linux_futex_wake_n_locked(uint64 uaddr, int n)
+{
+  int count = 0;
+
+  if(n < 0)
+    return 0;
+  for(struct proc *p = proc; p < &proc[NPROC]; p++){
+    if(count >= n)
+      break;
+    if(p == myproc())
+      continue;
+    acquire(&p->lock);
+    if(p->state == SLEEPING && p->chan == (void *)uaddr){
+      p->state = RUNNABLE;
+      count++;
+    }
+    release(&p->lock);
+  }
+  return count;
+}
+
+static int
+linux_futex_requeue_locked(uint64 uaddr, int nrwake, uint64 uaddr2,
+                           int nrrequeue)
+{
+  int count = 0;
+  int moved = 0;
+
+  if(nrwake < 0)
+    nrwake = 0;
+  if(nrrequeue < 0)
+    nrrequeue = 0;
+
+  for(struct proc *p = proc; p < &proc[NPROC]; p++){
+    if(p == myproc())
+      continue;
+    acquire(&p->lock);
+    if(p->state == SLEEPING && p->chan == (void *)uaddr){
+      if(count < nrwake){
+        p->state = RUNNABLE;
+        count++;
+      } else if(moved < nrrequeue && uaddr2 != 0){
+        p->chan = (void *)uaddr2;
+        moved++;
+      }
+    }
+    release(&p->lock);
+  }
+  return count + moved;
+}
+
+static int
+linux_futex_wake_n(uint64 uaddr, int n)
+{
+  int count;
+
+  futex_init();
+  acquire(&futex_lock);
+  count = linux_futex_wake_n_locked(uaddr, n);
+  release(&futex_lock);
+  return count;
+}
+
+static int
+linux_futex_op_arg(int op, int oparg)
+{
+  if(op & 8)
+    return 1 << oparg;
+  return oparg;
+}
+
+static int
+linux_futex_cmp(int old, int cmp, int cmparg)
+{
+  switch(cmp){
+  case 0: return old == cmparg; // FUTEX_OP_CMP_EQ
+  case 1: return old != cmparg; // FUTEX_OP_CMP_NE
+  case 2: return old < cmparg;  // FUTEX_OP_CMP_LT
+  case 3: return old <= cmparg; // FUTEX_OP_CMP_LE
+  case 4: return old > cmparg;  // FUTEX_OP_CMP_GT
+  case 5: return old >= cmparg; // FUTEX_OP_CMP_GE
+  default: return 0;
+  }
+}
+
+static int
+linux_futex_wake_op(uint64 uaddr, uint64 uaddr2, int nrwake, int nrwake2,
+                    int encoded)
+{
+  int old, new;
+  int op = (encoded >> 28) & 0xf;
+  int cmp = (encoded >> 24) & 0xf;
+  int oparg = linux_futex_op_arg(op, (encoded >> 12) & 0xfff);
+  int cmparg = encoded & 0xfff;
+
+  if(copyin(myproc()->pagetable, (char *)&old, uaddr2, sizeof(old)) < 0)
+    return -14; // EFAULT
+
+  switch(op & 7){
+  case 0: new = oparg; break;        // FUTEX_OP_SET
+  case 1: new = old + oparg; break;  // FUTEX_OP_ADD
+  case 2: new = old | oparg; break;  // FUTEX_OP_OR
+  case 3: new = old & ~oparg; break; // FUTEX_OP_ANDN
+  case 4: new = old ^ oparg; break;  // FUTEX_OP_XOR
+  default: return -38; // ENOSYS
+  }
+
+  if(copyout(myproc()->pagetable, uaddr2, (char *)&new, sizeof(new)) < 0)
+    return -14; // EFAULT
+
+  int count = linux_futex_wake_n_locked(uaddr, nrwake);
+  if(linux_futex_cmp(old, cmp, cmparg))
+    count += linux_futex_wake_n_locked(uaddr2, nrwake2);
+  return count;
 }
 
 uint64
@@ -169,6 +294,10 @@ sys_linux_getppid(void)
 uint64
 sys_linux_set_tid_address(void)
 {
+  uint64 addr;
+
+  argaddr(0, &addr);
+  myproc()->clear_child_tid = addr;
   return myproc()->pid;
 }
 
@@ -438,6 +567,40 @@ sys_linux_futex(void)
   switch(op){
   case 0:  // FUTEX_WAIT
   case 9:  // FUTEX_WAIT_BITSET
+    if(myproc()->trapframe->a3 != 0){
+      uint64 ts[2];
+      uint deadline, timeout;
+      if(copyin(myproc()->pagetable, (char *)ts, myproc()->trapframe->a3,
+                sizeof(ts)) < 0)
+        return -14; // EFAULT
+      timeout = ts[0] * 10 + (ts[1] + 99999999) / 100000000;
+      if(timeout == 0)
+        timeout = 1;
+      read_acquire(&tickslock);
+      deadline = ticks + timeout;
+      read_release(&tickslock);
+      if(copyin(myproc()->pagetable, (char *)&cur, uaddr, sizeof(cur)) < 0){
+        if(vmfault(myproc()->pagetable, uaddr, 1) == 0 ||
+           copyin(myproc()->pagetable, (char *)&cur, uaddr, sizeof(cur)) < 0)
+          return -14; // EFAULT
+      }
+      acquire(&futex_lock);
+      if(copyin(myproc()->pagetable, (char *)&cur, uaddr, sizeof(cur)) < 0){
+        release(&futex_lock);
+        return -14; // EFAULT
+      }
+      if(cur != val){
+        release(&futex_lock);
+        return -11; // EAGAIN
+      }
+      int timedout = futex_timed_sleep((void *)uaddr, &futex_lock, deadline);
+      release(&futex_lock);
+      if(linux_take_interrupt())
+        return -4; // EINTR
+      if(timedout)
+        return -110; // ETIMEDOUT
+      return 0;
+    }
     if(copyin(myproc()->pagetable, (char *)&cur, uaddr, sizeof(cur)) < 0){
       if(vmfault(myproc()->pagetable, uaddr, 1) == 0 ||
          copyin(myproc()->pagetable, (char *)&cur, uaddr, sizeof(cur)) < 0)
@@ -460,27 +623,32 @@ sys_linux_futex(void)
     return 0;
   case 1:  // FUTEX_WAKE
   case 10: // FUTEX_WAKE_BITSET
-    linux_futex_wake(uaddr);
-    return val;
+    return linux_futex_wake_n(uaddr, val);
   case 3:  // FUTEX_REQUEUE
-    linux_futex_wake(uaddr);
-    if(uaddr2)
-      linux_futex_wake(uaddr2);
-    return val;
+  {
+    futex_init();
+    acquire(&futex_lock);
+    int nrrequeue = (int)myproc()->trapframe->a3;
+    int count = linux_futex_requeue_locked(uaddr, val, uaddr2, nrrequeue);
+    release(&futex_lock);
+    return count;
+  }
   case 4:  // FUTEX_CMP_REQUEUE
     if(copyin(myproc()->pagetable, (char *)&cur, uaddr, sizeof(cur)) < 0)
       return -14; // EFAULT
     if(cur != val3)
       return -11; // EAGAIN
-    linux_futex_wake(uaddr);
-    if(uaddr2)
-      linux_futex_wake(uaddr2);
-    return val;
+    futex_init();
+    acquire(&futex_lock);
+    int nrrequeue = (int)myproc()->trapframe->a3;
+    int count = linux_futex_requeue_locked(uaddr, val, uaddr2, nrrequeue);
+    release(&futex_lock);
+    return count;
   case 5:  // FUTEX_WAKE_OP
-    linux_futex_wake(uaddr);
-    if(uaddr2)
-      linux_futex_wake(uaddr2);
-    return val;
+    acquire(&futex_lock);
+    int r = linux_futex_wake_op(uaddr, uaddr2, val, val3, (int)myproc()->trapframe->a3);
+    release(&futex_lock);
+    return r;
   default:
     return 0;
   }

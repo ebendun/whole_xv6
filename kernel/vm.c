@@ -586,6 +586,11 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       flags = (flags & ~PTE_W) | PTE_COW;
       *pte = PA2PTE(pa) | flags;
     }
+    pte_t *npte = walk(new, i, 0);
+    if(npte && (*npte & PTE_V)){
+      szinc = PGSIZE;
+      continue;
+    }
     if(mappages(new, i, PGSIZE, pa, flags) != 0)
       goto err;
     kref_inc(pa);
@@ -621,6 +626,20 @@ uvmshare(pagetable_t old, pagetable_t new, uint64 sz)
         panic("uvmshare: unaligned superpage");
       pa = PTE2PA(*pte);
       flags = PTE_FLAGS(*pte);
+      if(flags & PTE_COW){
+        flags = (flags | PTE_W) & ~PTE_COW;
+        if(superref_get(pa) == 1){
+          *pte = PA2PTE(pa) | flags;
+        } else {
+          char *mem = superalloc();
+          if(mem == 0)
+            goto err;
+          memmove(mem, (void *)pa, SUPERPGSIZE);
+          *pte = PA2PTE(mem) | flags;
+          superfree((void *)pa);
+          pa = (uint64)mem;
+        }
+      }
       pte_t *npte = walk_to_level(new, i, 1, 1);
       if(npte == 0 || (*npte & PTE_V))
         goto err;
@@ -633,6 +652,20 @@ uvmshare(pagetable_t old, pagetable_t new, uint64 sz)
     szinc = PGSIZE;
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
+    if(flags & PTE_COW){
+      flags = (flags | PTE_W) & ~PTE_COW;
+      if(kref_get(pa) == 1){
+        *pte = PA2PTE(pa) | flags;
+      } else {
+        char *mem = kalloc();
+        if(mem == 0)
+          goto err;
+        memmove(mem, (void *)pa, PGSIZE);
+        *pte = PA2PTE(mem) | flags;
+        kfree((void *)pa);
+        pa = (uint64)mem;
+      }
+    }
     if(mappages(new, i, PGSIZE, pa, flags) != 0)
       goto err;
     kref_inc(pa);

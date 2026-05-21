@@ -15,6 +15,8 @@ OBJS = \
   $K/main.o \
   $K/vm.o \
   $K/proc.o \
+  $K/devzero.o \
+  $K/sbi.o \
   $K/swtch.o \
   $K/trampoline.o \
   $K/trap.o \
@@ -35,7 +37,6 @@ OBJS = \
   $K/ext4_probe.o \
   $K/virtio_net.o \
   $K/net.o \
-  $K/stats.o\
   $K/sprintf.o\
 
 OBJS_KCSAN = \
@@ -155,9 +156,6 @@ tags: $(OBJS)
 
 ULIB = $U/ulib.o $U/usys.o $U/printf.o $U/umalloc.o
 
-
-ULIB += $U/statistics.o
-
 _%: %.o $(ULIB) $U/user.ld
 	$(LD) $(LDFLAGS) -T $U/user.ld -o $@ $< $(ULIB)
 	$(OBJDUMP) -S $@ > $*.asm
@@ -214,9 +212,6 @@ UPROGS=\
 	$U/_alarmtest\
 	$U/_cowtest\
 	$U/_nettest\
-	$U/_stats\
-	$U/_kalloctest\
-	$U/_bcachetest\
 	$U/_mmaptest\
 	$U/_memdump\
 

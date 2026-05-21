@@ -179,11 +179,15 @@ kerneltrap()
 void
 clockintr()
 {
+  uint now = 0;
+
   if(cpuid() == 0){
     write_acquire(&tickslock);
     ticks++;
+    now = ticks;
     wakeup(&ticks);
     write_release(&tickslock);
+    futex_tick(now);
   }
 
   // ask for the next timer interrupt. this also clears
