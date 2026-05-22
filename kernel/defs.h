@@ -11,6 +11,8 @@ struct sleeplock;
 struct stat;
 struct superblock;
 struct rwspinlock;
+struct vfs_path;
+struct vfs_node;
 
 // bio.c
 void            binit(void);
@@ -129,6 +131,20 @@ void            yield(void);
 int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
 int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 void            procdump(void);
+
+// vfs.c
+void            vfsinit(void);
+struct vfs_mount* vfs_root_mount(void);
+int             vfs_mount(char*, char*, char*, uint64);
+int             vfs_umount(char*, int);
+void            vfs_join_path(char*, int, char*, char*);
+int             vfs_set_proc_root(struct proc*, char*);
+int             vfs_set_proc_cwd(struct proc*, char*);
+int             vfs_proc_cwd_path(struct proc*, char*, int);
+int             vfs_resolve(char*, struct vfs_path*);
+int             vfs_resolve_proc_path(struct proc*, char*, struct vfs_path*);
+int             vfs_redirect_proc_path(struct proc*, char*, char*, int);
+int             vfs_file_stat_node(struct file*, struct vfs_node*);
 
 // swtch.S
 void            swtch(struct context*, struct context*);

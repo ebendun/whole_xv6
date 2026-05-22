@@ -12,6 +12,7 @@
 #include "file.h"
 #include "stat.h"
 #include "proc.h"
+#include "vfs.h"
 
 struct devsw devsw[NDEV];
 struct {
@@ -88,30 +89,8 @@ fileclose(struct file *f)
 int
 filestat(struct file *f, uint64 addr)
 {
-  struct proc *p = myproc();
-  struct stat st;
-  
-  if(f->type == FD_INODE || f->type == FD_DEVICE){
-    ilock(f->ip);
-    stati(f->ip, &st);
-    iunlock(f->ip);
-    if(copyout(p->pagetable, addr, (char *)&st, sizeof(st)) < 0)
-      return -1;
-    return 0;
-  } 
-  else if(f->type == FD_EXT4){
-    memset(&st, 0, sizeof(st));
-    st.dev = FIRSTDEV;
-    st.type = ext4_path_is_dir(FIRSTDEV, f->ext4_path) ? T_DIR : T_FILE;
-    st.nlink = 1;
-    st.size = ext4_file_size_by_path(FIRSTDEV, f->ext4_path);
-    if(st.size == 0 && !ext4_path_is_reg(FIRSTDEV, f->ext4_path) &&
-       !ext4_path_is_dir(FIRSTDEV, f->ext4_path))
-      return -1;
-    if(copyout(p->pagetable, addr, (char *)&st, sizeof(st)) < 0)
-      return -1;
-    return 0;
-  }
+  if(f->vfs_ops && f->vfs_ops->file && f->vfs_ops->file->stat)
+    return f->vfs_ops->file->stat(f, addr);
   return -1;
 }
 
@@ -131,50 +110,8 @@ fileread(struct file *f, uint64 addr, int n)
     if(f->major < 0 || f->major >= NDEV || !devsw[f->major].read)
       return -1;
     r = devsw[f->major].read(1, addr, n);
-  } else if(f->type == FD_INODE){
-    ilock(f->ip);
-    if((r = readi(f->ip, 1, addr, f->off, n)) > 0)
-      f->off += r;
-    iunlock(f->ip);
-  } else if(f->type == FD_EXT4){
-    if(ext4_path_is_dir(FIRSTDEV, f->ext4_path)){
-      struct dirent de;
-      uint64 next, ino;
-      uchar type;
-      char name[DIRSIZ + 1];
-      int ok;
-
-      if(n < sizeof(de))
-        return -1;
-      for(;;){
-        ok = ext4_dirent_by_path(FIRSTDEV, f->ext4_path, f->off, &next,
-                                 &ino, &type, name, sizeof(name));
-        if(ok <= 0)
-          return ok;
-        f->off = next;
-        memset(&de, 0, sizeof(de));
-        de.inum = ino;
-        safestrcpy(de.name, name, sizeof(de.name));
-        if(copyout(myproc()->pagetable, addr, (char *)&de, sizeof(de)) < 0)
-          return -1;
-        return sizeof(de);
-      }
-    }
-    char *buf = kalloc();
-    int m;
-    if(buf == 0)
-      return -1;
-    m = n;
-    if(m > PGSIZE)
-      m = PGSIZE;
-    r = ext4_read_file_by_path_at(FIRSTDEV, f->ext4_path, (uchar *)buf, m, f->off);
-    if(r > 0){
-      if(copyout(myproc()->pagetable, addr, buf, r) < 0)
-        r = -1;
-      else
-        f->off += r;
-    }
-    kfree(buf);
+  } else if(f->vfs_ops && f->vfs_ops->file && f->vfs_ops->file->read){
+    r = f->vfs_ops->file->read(f, addr, n);
   } else {
     panic("fileread");
   }
@@ -187,7 +124,7 @@ fileread(struct file *f, uint64 addr, int n)
 int
 filewrite(struct file *f, uint64 addr, int n)
 {
-  int r, ret = 0;
+  int ret = 0;
 
   if(f->writable == 0)
     return -1;
@@ -198,34 +135,8 @@ filewrite(struct file *f, uint64 addr, int n)
     if(f->major < 0 || f->major >= NDEV || !devsw[f->major].write)
       return -1;
     ret = devsw[f->major].write(1, addr, n);
-  } else if(f->type == FD_INODE){
-    // write a few blocks at a time to avoid exceeding
-    // the maximum log transaction size, including
-    // i-node, indirect block, allocation blocks,
-    // and 2 blocks of slop for non-aligned writes.
-    int max = ((MAXOPBLOCKS-1-1-2) / 2) * BSIZE;
-    int i = 0;
-    while(i < n){
-      int n1 = n - i;
-      if(n1 > max)
-        n1 = max;
-
-      begin_op();
-      ilock(f->ip);
-      if ((r = writei(f->ip, 1, addr + i, f->off, n1)) > 0)
-        f->off += r;
-      iunlock(f->ip);
-      end_op();
-
-      if(r != n1){
-        // error from writei
-        break;
-      }
-      i += r;
-    }
-    ret = (i == n ? n : -1);
-  } else if(f->type == FD_EXT4){
-    ret = -1;
+  } else if(f->vfs_ops && f->vfs_ops->file && f->vfs_ops->file->write){
+    ret = f->vfs_ops->file->write(f, addr, n);
   } else {
     panic("filewrite");
   }

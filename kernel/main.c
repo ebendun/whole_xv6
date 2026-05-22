@@ -33,6 +33,7 @@ main()
     binit();         // buffer cache
     iinit();         // inode table
     fileinit();      // file table
+    vfsinit();       // virtual filesystem mount table
     virtio_disk_init(); // emulated hard disk
     virtio_net_init();
     netinit();

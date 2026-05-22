@@ -94,6 +94,15 @@ struct vma {
   struct file *f;
 };
 
+struct vfs_mount;
+
+struct proc_vfs_cwd {
+  struct vfs_mount *mount;
+  char inner[MAXPATH];
+  char abs_path[MAXPATH];
+};
+
+
 // Per-process state
 struct proc {
   struct spinlock lock;
@@ -138,6 +147,10 @@ struct proc {
   struct inode *cwd;           // Current directory
   int cwd_is_ext4;             // Current directory is on FIRSTDEV ext4 image
   char ext4_cwd[MAXPATH];      // Absolute cwd path on the ext4 image
+  struct proc_vfs_cwd vfs_root;// Process root in VFS terms
+  struct proc_vfs_cwd vfs_cwd; // Current directory in VFS terms
+  int vfs_redirect;            // Redirect writes from read-only ext4 fs to writable root
+  char vfs_redirect_root[MAXPATH];
   char name[16];               // Process name (debugging)
   int interpose_mask;          // Bit mask of blocked syscalls
   char interpose_path[MAXPATH];// Allowed path for masked open/exec

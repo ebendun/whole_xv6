@@ -7,6 +7,7 @@
 #include "fs.h"
 #include "defs.h"
 #include "elf.h"
+#include "vfs.h"
 
 #define AT_NULL   0
 #define AT_PHDR   3
@@ -142,6 +143,7 @@ kexec(char *path, char **argv)
   uint64 app_brk, at_base = 0, entry;
   int stack_pages;
   struct inode *ip;
+  struct vfs_path vp;
   pagetable_t pagetable = 0, oldpagetable;
   struct proc *p = myproc();
   int ret;
@@ -153,7 +155,30 @@ kexec(char *path, char **argv)
 
   // Open the executable file.
   ip = 0;
-  if(path[0] != '/' && p->cwd_is_ext4 &&
+  if(vfs_resolve_proc_path(p, path, &vp) == 0 &&
+     vp.type == VFS_EXT4 &&
+     ext4_path_is_reg(FIRSTDEV, vp.inner))
+  {
+      safestrcpy(st->epath, vp.inner, sizeof(st->epath));
+      is_ext4 = 1;
+  }
+  else if(vfs_resolve_proc_path(p, path, &vp) == 0 &&
+            vp.type == VFS_XV6)
+  {
+    begin_op();
+    if((ip = namei(vp.inner)) == 0){
+      end_op();
+      if(resolve_ext4_path(path, st->epath, sizeof(st->epath)) &&
+         ext4_path_is_reg(FIRSTDEV, st->epath)){
+        is_ext4 = 1;
+      } else {
+        kfree(st);
+        return -1;
+      }
+    } else {
+      ilock(ip);
+    }
+  } else if(path[0] != '/' && p->cwd_is_ext4 &&
      resolve_ext4_path(path, st->epath, sizeof(st->epath)) &&
      ext4_path_is_reg(FIRSTDEV, st->epath)){
     is_ext4 = 1;
@@ -381,6 +406,15 @@ kexec(char *path, char **argv)
   p->pagetable = pagetable;
   p->sz = sz;
   p->is_linux = is_ext4;
+  if(is_ext4){
+    vfs_set_proc_root(p, "/ext4");
+    p->vfs_redirect = 1;
+    safestrcpy(p->vfs_redirect_root, "/tmp", sizeof(p->vfs_redirect_root));
+  } else {
+    vfs_set_proc_root(p, "/");
+    p->vfs_redirect = 0;
+    p->vfs_redirect_root[0] = 0;
+  }
   p->mmap_base = USIGRETURN;
   p->trapframe->epc = entry;  // initial program counter
   p->trapframe->sp = sp; // initial stack pointer

@@ -22,9 +22,12 @@ main(void)
     mknod("/dev/null", DEVNULL, 0);
     mknod("/dev/zero", DEVZERO, 0);
     open("/dev/console", O_RDWR);
+    printf("init: failed to open console\n");
   } 
   mknod("/dev/null", DEVNULL, 0);
   mknod("/dev/zero", DEVZERO, 0);
+  mkdir("/ext4");
+  mkdir("/tmp");
   mkdir("/dev/shm");
   dup(0);  // stdout
   dup(0);  // stderr

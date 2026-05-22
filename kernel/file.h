@@ -4,6 +4,8 @@
 #define SOCKET_QUEUE 8
 #define SOCKET_PAYLOAD 512
 
+struct vfs_ops;
+
 struct linux_sockaddr_in {
   ushort family;
   ushort port;
@@ -22,6 +24,7 @@ struct file {
   int ref; // reference count
   char readable;
   char writable;
+  struct vfs_ops *vfs_ops;
   int fd_flags;
   int status_flags;
   int has_time;

@@ -175,6 +175,14 @@ found:
   p->interpose_path[0] = 0;
   p->cwd_is_ext4 = 0;
   safestrcpy(p->ext4_cwd, "/", sizeof(p->ext4_cwd));
+  p->vfs_root.mount = vfs_root_mount();
+  safestrcpy(p->vfs_root.inner, "/", sizeof(p->vfs_root.inner));
+  safestrcpy(p->vfs_root.abs_path, "/", sizeof(p->vfs_root.abs_path));
+  p->vfs_cwd.mount = vfs_root_mount();
+  safestrcpy(p->vfs_cwd.inner, "/", sizeof(p->vfs_cwd.inner));
+  safestrcpy(p->vfs_cwd.abs_path, "/", sizeof(p->vfs_cwd.abs_path));
+  p->vfs_redirect = 0;
+  p->vfs_redirect_root[0] = 0;
   p->mmap_base = USIGRETURN;
   p->is_linux = 0;
   p->linux_brk = 0;
@@ -278,6 +286,14 @@ freeproc(struct proc *p)
   p->interpose_path[0] = 0;
   p->cwd_is_ext4 = 0;
   p->ext4_cwd[0] = 0;
+  p->vfs_root.mount = 0;
+  p->vfs_root.inner[0] = 0;
+  p->vfs_root.abs_path[0] = 0;
+  p->vfs_cwd.mount = 0;
+  p->vfs_cwd.inner[0] = 0;
+  p->vfs_cwd.abs_path[0] = 0;
+  p->vfs_redirect = 0;
+  p->vfs_redirect_root[0] = 0;
   
   p->alarm_interval = 0;
   p->alarm_ticks = 0;
@@ -754,6 +770,14 @@ forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, int share_vm, int share
   np->cwd = idup(p->cwd);
   np->cwd_is_ext4 = p->cwd_is_ext4;
   safestrcpy(np->ext4_cwd, p->ext4_cwd, sizeof(np->ext4_cwd));
+  np->vfs_root.mount = p->vfs_root.mount;
+  safestrcpy(np->vfs_root.inner, p->vfs_root.inner, sizeof(np->vfs_root.inner));
+  safestrcpy(np->vfs_root.abs_path, p->vfs_root.abs_path, sizeof(np->vfs_root.abs_path));
+  np->vfs_cwd.mount = p->vfs_cwd.mount;
+  safestrcpy(np->vfs_cwd.inner, p->vfs_cwd.inner, sizeof(np->vfs_cwd.inner));
+  safestrcpy(np->vfs_cwd.abs_path, p->vfs_cwd.abs_path, sizeof(np->vfs_cwd.abs_path));
+  np->vfs_redirect = p->vfs_redirect;
+  safestrcpy(np->vfs_redirect_root, p->vfs_redirect_root, sizeof(np->vfs_redirect_root));
   np->interpose_mask = p->interpose_mask;
   safestrcpy(np->interpose_path, p->interpose_path, sizeof(np->interpose_path));
   np->mmap_base = p->mmap_base;

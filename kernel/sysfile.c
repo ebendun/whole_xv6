@@ -16,10 +16,17 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "vfs.h"
 
 static int linux_copy_stat_time(uint64 staddr, uint64 dev, uint64 ino,
                                 uint64 mode, uint64 nlink, uint64 size,
                                 char *path, struct file *tf);
+static int xv6_ensure_parent_dirs(char *path);
+static int vfs_open_path(char *path, int omode, struct file **fp);
+static int vfs_stat_path(char *path, struct vfs_node *node);
+static int vfs_prepare_write_path(struct proc *p, char *path, char *actual,
+                                  int actualsz, struct vfs_path *vp);
+static int vfs_sync_legacy_cwd(struct proc *p, struct vfs_path *vp);
 extern struct proc proc[NPROC];
 
 static struct spinlock linux_socket_lock;
@@ -909,181 +916,150 @@ sys_fstat(void)
 uint64
 sys_link(void)
 {
-  char name[DIRSIZ], new[MAXPATH], old[MAXPATH];
-  struct inode *dp, *ip;
+  char new[MAXPATH], old[MAXPATH], actual_old[MAXPATH], actual_new[MAXPATH];
+  struct vfs_path oldvp, newvp;
+  struct proc *p = myproc();
 
   if(argstr(0, old, MAXPATH) < 0 || argstr(1, new, MAXPATH) < 0)
     return -1;
-
-  begin_op();
-  if((ip = namei(old)) == 0){
-    end_op();
+  if(vfs_prepare_write_path(p, old, actual_old, sizeof(actual_old), &oldvp) < 0 ||
+     vfs_prepare_write_path(p, new, actual_new, sizeof(actual_new), &newvp) < 0)
     return -1;
-  }
-
-  ilock(ip);
-  if(ip->type == T_DIR){
-    iunlockput(ip);
-    end_op();
+  if(oldvp.mount != newvp.mount ||
+     oldvp.ops == 0 || oldvp.ops->inode == 0 || oldvp.ops->inode->link == 0 ||
+     oldvp.ops->inode->link(oldvp.mount, oldvp.inner, newvp.inner) < 0)
     return -1;
-  }
-
-  ip->nlink++;
-  iupdate(ip);
-  iunlock(ip);
-
-  if((dp = nameiparent(new, name)) == 0)
-    goto bad;
-  ilock(dp);
-  if(dp->dev != ip->dev || dirlink(dp, name, ip->inum) < 0){
-    iunlockput(dp);
-    goto bad;
-  }
-  iunlockput(dp);
-  iput(ip);
-
-  end_op();
-
   return 0;
-
-bad:
-  ilock(ip);
-  ip->nlink--;
-  iupdate(ip);
-  iunlockput(ip);
-  end_op();
-  return -1;
-}
-
-// Is the directory dp empty except for "." and ".." ?
-static int
-isdirempty(struct inode *dp)
-{
-  int off;
-  struct dirent de;
-
-  for(off=2*sizeof(de); off<dp->size; off+=sizeof(de)){
-    if(readi(dp, 0, (uint64)&de, off, sizeof(de)) != sizeof(de))
-      panic("isdirempty: readi");
-    if(de.inum != 0)
-      return 0;
-  }
-  return 1;
 }
 
 uint64
 sys_unlink(void)
 {
-  struct inode *ip, *dp;
-  struct dirent de;
-  char name[DIRSIZ], path[MAXPATH];
-  uint off;
+  char path[MAXPATH], actual[MAXPATH];
+  struct vfs_path vp;
+  struct proc *p = myproc();
 
   if(argstr(0, path, MAXPATH) < 0)
     return -1;
+  if(vfs_prepare_write_path(p, path, actual, sizeof(actual), &vp) < 0 ||
+     vp.ops == 0 || vp.ops->inode == 0 || vp.ops->inode->unlink == 0 ||
+     vp.ops->inode->unlink(vp.mount, vp.inner) < 0)
+    return -1;
+  return 0;
+}
+
+static int
+xv6_ensure_parent_dirs(char *path)
+{
+  char cur[MAXPATH];
+  int len;
+
+  if(path == 0 || path[0] != '/')
+    return -1;
+
+  len = strlen(path);
+  for(int i = 1; i < len; i++){
+    struct vfs_path vp;
+
+    if(path[i] != '/')
+      continue;
+    if(i + 1 >= len)
+      break;
+
+    memmove(cur, path, i);
+    cur[i] = 0;
+
+    if(vfs_resolve(cur, &vp) < 0 ||
+       vp.ops == 0 || vp.ops->inode == 0 || vp.ops->inode->mkdir == 0 ||
+       vp.ops->inode->mkdir(vp.mount, vp.inner, 0) < 0)
+      return -1;
+  }
+
+  return 0;
+}
+
+static int
+vfs_open_path(char *path, int omode, struct file **fp)
+{
+  struct vfs_path vp;
+
+  if(path == 0 || fp == 0)
+    return -1;
+  if(vfs_resolve(path, &vp) < 0 ||
+     vp.ops == 0 || vp.ops->file == 0 || vp.ops->file->open == 0)
+    return -1;
+  return vp.ops->file->open(vp.mount, vp.inner, omode, fp);
+}
+
+static int
+vfs_stat_path(char *path, struct vfs_node *node)
+{
+  struct vfs_path vp;
+
+  if(path == 0 || node == 0)
+    return -1;
+  if(vfs_resolve(path, &vp) < 0 ||
+     vp.ops == 0 || vp.ops->inode == 0 || vp.ops->inode->lookup == 0)
+    return -1;
+  return vp.ops->inode->lookup(vp.mount, vp.inner, node);
+}
+
+static int
+vfs_prepare_write_path(struct proc *p, char *path, char *actual, int actualsz,
+                       struct vfs_path *vp)
+{
+  char rpath[MAXPATH];
+
+  if(p == 0 || path == 0 || actual == 0 || actualsz <= 0 || vp == 0)
+    return -1;
+
+  if(vfs_redirect_proc_path(p, path, rpath, sizeof(rpath)) == 0){
+    if(xv6_ensure_parent_dirs(rpath) < 0)
+      return -1;
+    safestrcpy(actual, rpath, actualsz);
+    return vfs_resolve(actual, vp);
+  }
+
+  safestrcpy(actual, path, actualsz);
+  return vfs_resolve_proc_path(p, path, vp);
+}
+
+static int
+vfs_sync_legacy_cwd(struct proc *p, struct vfs_path *vp)
+{
+  struct inode *ip;
+
+  if(p == 0 || vp == 0)
+    return -1;
+
+  if(vp->type == VFS_EXT4){
+    p->cwd_is_ext4 = 1;
+    safestrcpy(p->ext4_cwd, vp->inner, sizeof(p->ext4_cwd));
+    return 0;
+  }
+
+  if(vp->type != VFS_XV6)
+    return -1;
 
   begin_op();
-  if((dp = nameiparent(path, name)) == 0){
+  if((ip = namei(vp->inner)) == 0){
     end_op();
     return -1;
   }
-
-  ilock(dp);
-
-  // Cannot unlink "." or "..".
-  if(namecmp(name, ".") == 0 || namecmp(name, "..") == 0)
-    goto bad;
-
-  if((ip = dirlookup(dp, name, &off)) == 0)
-    goto bad;
   ilock(ip);
-
-  if(ip->nlink < 1)
-    panic("unlink: nlink < 1");
-  if(ip->type == T_DIR && !isdirempty(ip)){
+  if(ip->type != T_DIR){
     iunlockput(ip);
-    goto bad;
+    end_op();
+    return -1;
   }
-
-  memset(&de, 0, sizeof(de));
-  if(writei(dp, 0, (uint64)&de, off, sizeof(de)) != sizeof(de))
-    panic("unlink: writei");
-  if(ip->type == T_DIR){
-    dp->nlink--;
-    iupdate(dp);
-  }
-  iunlockput(dp);
-
-  ip->nlink--;
-  iupdate(ip);
-  iunlockput(ip);
-
+  iunlock(ip);
+  if(p->cwd)
+    iput(p->cwd);
   end_op();
 
-  return 0;
-
-bad:
-  iunlockput(dp);
-  end_op();
-  return -1;
-}
-
-static struct inode*
-create(char *path, short type, short major, short minor)
-{
-  struct inode *ip, *dp;
-  char name[DIRSIZ];
-
-  if((dp = nameiparent(path, name)) == 0)
-    return 0;
-
-  ilock(dp);
-
-  if((ip = dirlookup(dp, name, 0)) != 0){
-    iunlockput(dp);
-    ilock(ip);
-    if(type == T_FILE && (ip->type == T_FILE || ip->type == T_DEVICE))
-      return ip;
-    iunlockput(ip);
-    return 0;
-  }
-
-  if((ip = ialloc(dp->dev, type)) == 0){
-    iunlockput(dp);
-    return 0;
-  }
-
-  ilock(ip);
-  ip->major = major;
-  ip->minor = minor;
-  ip->nlink = 1;
-  iupdate(ip);
-
-  if(type == T_DIR){  // Create . and .. entries.
-    // No ip->nlink++ for ".": avoid cyclic ref count.
-    if(dirlink(ip, ".", ip->inum) < 0 || dirlink(ip, "..", dp->inum) < 0)
-      goto fail;
-  }
-
-  if(dirlink(dp, name, ip->inum) < 0)
-    goto fail;
-
-  if(type == T_DIR){
-    // now that success is guaranteed:
-    dp->nlink++;  // for ".."
-    iupdate(dp);
-  }
-
-  iunlockput(dp);
-
-  return ip;
-
- fail:
-  // something went wrong. de-allocate ip.
-  ip->nlink = 0;
-  iupdate(ip);
-  iunlockput(ip);
-  iunlockput(dp);
+  p->cwd = ip;
+  p->cwd_is_ext4 = 0;
+  safestrcpy(p->ext4_cwd, "/", sizeof(p->ext4_cwd));
   return 0;
 }
 
@@ -1091,9 +1067,13 @@ uint64
 sys_open(void)
 {
   char path[MAXPATH];
+  char rpath[MAXPATH];
+  char actual[MAXPATH];
   int fd, omode;
   struct file *f;
-  struct inode *ip;
+  struct vfs_path vp;
+  struct vfs_node node;
+  struct proc *p = myproc();
   int n;
 
   argint(1, &omode);
@@ -1101,81 +1081,36 @@ sys_open(void)
     return -1;
 
   if((omode & O_CREATE) == 0){
-    char epath[MAXPATH];
-    //judge the file wether in ext4 or not
-    if(strncmp(path, "/", 2) != 0 &&
-       resolve_ext4_path(path, epath, sizeof(epath)) &&
-       (ext4_path_is_reg(FIRSTDEV, epath) || ext4_path_is_dir(FIRSTDEV, epath))){
-      if((omode & 3) != O_RDONLY)
-        return -1;
-      if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
-        if(f)
-          fileclose(f);
+    if(vfs_redirect_proc_path(p, path, rpath, sizeof(rpath)) == 0 &&
+       vfs_open_path(rpath, omode, &f) == 0){
+      if((fd = fdalloc(f)) < 0){
+        fileclose(f);
         return -24; // EMFILE
       }
-      f->type = FD_EXT4;
-      f->off = 0;
-      f->ip = 0;
-      f->readable = !(omode & O_WRONLY);
-      f->writable = 0;
-      safestrcpy(f->ext4_path, epath, sizeof(f->ext4_path));
       return fd;
     }
-  }
-
-  begin_op();
-
-  if(omode & O_CREATE){
-    ip = create(path, T_FILE, 0, 0);
-    if(ip == 0){
-      end_op();
-      return -1;
+    if(vfs_resolve_proc_path(p, path, &vp) == 0 &&
+       vp.ops && vp.ops->file && vp.ops->file->open &&
+       vp.ops->file->open(vp.mount, vp.inner, omode, &f) == 0){
+      if((fd = fdalloc(f)) < 0){
+        fileclose(f);
+        return -24; // EMFILE
+      }
+      return fd;
     }
-  } else {
-    if((ip = namei(path)) == 0){
-      end_op();
-      return -1;
-    }
-    ilock(ip);
-    if(ip->type == T_DIR && omode != O_RDONLY){
-      iunlockput(ip);
-      end_op();
-      return -1;
-    }
-  }
-
-  if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
-    iunlockput(ip);
-    end_op();
     return -1;
   }
 
-  if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
-    if(f)
-      fileclose(f);
-    iunlockput(ip);
-    end_op();
+  if(vfs_prepare_write_path(p, path, actual, sizeof(actual), &vp) < 0 ||
+     vp.ops == 0 || vp.ops->inode == 0 || vp.ops->inode->create == 0 ||
+     vp.ops->file == 0 || vp.ops->file->open == 0 ||
+     vp.ops->inode->create(vp.mount, vp.inner, T_FILE, 0, &node) < 0 ||
+     vp.ops->file->open(vp.mount, vp.inner, omode & ~O_CREATE, &f) < 0)
+    return -1;
+  if((fd = fdalloc(f)) < 0){
+    fileclose(f);
     return -24; // EMFILE
   }
-
-  if(ip->type == T_DEVICE){
-    f->type = FD_DEVICE;
-    f->major = ip->major;
-  } else {
-    f->type = FD_INODE;
-    f->off = 0;
-  }
-  f->ip = ip;
-  f->readable = !(omode & O_WRONLY);
-  f->writable = (omode & O_WRONLY) || (omode & O_RDWR);
-
-  if((omode & O_TRUNC) && ip->type == T_FILE){
-    itrunc(ip);
-  }
-
-  iunlock(ip);
-  end_op();
-
   return fd;
 }
 
@@ -1194,10 +1129,13 @@ uint64
 sys_linux_openat(void)
 {
   char path[MAXPATH];
+  char rpath[MAXPATH];
+  char actual[MAXPATH];
   int fd, dirfd, flags, omode;
   uint64 mode;
   struct file *f;
-  struct inode *ip;
+  struct vfs_path vp;
+  struct vfs_node node;
   struct proc *p = myproc();
 
   argint(0, &dirfd);
@@ -1217,75 +1155,37 @@ sys_linux_openat(void)
     return -24; // EMFILE
   omode = linux_open_flags(flags);
   if((omode & O_CREATE) == 0){
-    char epath[MAXPATH];
-    if(strncmp(path, "/", 2) != 0 &&
-       resolve_ext4_path(path, epath, sizeof(epath)) &&
-       (ext4_path_is_reg(FIRSTDEV, epath) || ext4_path_is_dir(FIRSTDEV, epath))){
-      if((omode & 3) != O_RDONLY)
-        return -1;
-      if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
-        if(f)
-          fileclose(f);
+    if(vfs_redirect_proc_path(p, path, rpath, sizeof(rpath)) == 0 &&
+       vfs_open_path(rpath, omode, &f) == 0){
+      if((fd = fdalloc(f)) < 0){
+        fileclose(f);
         return -1;
       }
-      f->type = FD_EXT4;
-      f->off = 0;
-      f->ip = 0;
-      f->readable = 1;
-      f->writable = 0;
-      safestrcpy(f->ext4_path, epath, sizeof(f->ext4_path));
       return fd;
     }
-  }
-
-  begin_op();
-  if(omode & O_CREATE){
-    ip = create(path, T_FILE, 0, 0);
-    if(ip == 0){
-      end_op();
-      return -1;
+    if(vfs_resolve_proc_path(p, path, &vp) == 0 &&
+       vp.ops && vp.ops->file && vp.ops->file->open &&
+       vp.ops->file->open(vp.mount, vp.inner, omode, &f) == 0){
+      if((fd = fdalloc(f)) < 0){
+        fileclose(f);
+        return -1;
+      }
+      return fd;
     }
-  } else {
-    if((ip = namei(path)) == 0){
-      end_op();
-      return -1;
-    }
-    ilock(ip);
-    if(ip->type == T_DIR && omode != O_RDONLY){
-      iunlockput(ip);
-      end_op();
-      return -1;
-    }
-  }
-
-  if(ip->type == T_DEVICE && (ip->major < 0 || ip->major >= NDEV)){
-    iunlockput(ip);
-    end_op();
     return -1;
   }
 
-  if((f = filealloc()) == 0 || (fd = fdalloc(f)) < 0){
-    if(f)
-      fileclose(f);
-    iunlockput(ip);
-    end_op();
+  if(vfs_prepare_write_path(p, path, actual, sizeof(actual), &vp) < 0 ||
+     vp.ops == 0 || vp.ops->inode == 0 || vp.ops->inode->create == 0 ||
+     vp.ops->file == 0 || vp.ops->file->open == 0 ||
+     vp.ops->inode->create(vp.mount, vp.inner, T_FILE, mode, &node) < 0 ||
+     vp.ops->file->open(vp.mount, vp.inner, omode & ~O_CREATE, &f) < 0)
+    return -1;
+
+  if((fd = fdalloc(f)) < 0){
+    fileclose(f);
     return -1;
   }
-  if(ip->type == T_DEVICE){
-    f->type = FD_DEVICE;
-    f->major = ip->major;
-  } else {
-    f->type = FD_INODE;
-    f->off = 0;
-  }
-  f->ip = ip;
-  f->readable = !(omode & O_WRONLY);
-  f->writable = (omode & O_WRONLY) || (omode & O_RDWR);
-  safestrcpy(f->ext4_path, path, sizeof(f->ext4_path));
-  if((omode & O_TRUNC) && ip->type == T_FILE)
-    itrunc(ip);
-  iunlock(ip);
-  end_op();
   return fd;
 }
 
@@ -1353,7 +1253,7 @@ uint64
 sys_linux_lseek(void)
 {
   int fd, whence;
-  uint64 off, size;
+  uint64 off;
   struct file *f;
 
   argint(0, &fd);
@@ -1362,26 +1262,9 @@ sys_linux_lseek(void)
   if(argfd(0, 0, &f) < 0)
     return -1;
 
-  if(f->type == FD_EXT4){
-    size = ext4_file_size_by_path(FIRSTDEV, f->ext4_path);
-  } else if(f->type == FD_INODE){
-    ilock(f->ip);
-    size = f->ip->size;
-    iunlock(f->ip);
-  } else {
-    return -1;
-  }
-
-  if(whence == 0){
-    f->off = off;
-  } else if(whence == 1){
-    f->off += off;
-  } else if(whence == 2){
-    f->off = size + off;
-  } else {
-    return -1;
-  }
-  return f->off;
+  if(f->vfs_ops && f->vfs_ops->file && f->vfs_ops->file->lseek)
+    return f->vfs_ops->file->lseek(f, off, whence);
+  return -1;
 }
 
 uint64
@@ -1543,8 +1426,13 @@ uint64
 sys_linux_newfstatat(void)
 {
   char path[MAXPATH];
+  char rpath[MAXPATH];
   uint64 staddr;
   int dirfd, flags;
+  struct vfs_path vp;
+  struct vfs_node node;
+  uint64 mode;
+  struct proc *p = myproc();
 
   argint(0, &dirfd);
   argaddr(2, &staddr);
@@ -1556,34 +1444,28 @@ sys_linux_newfstatat(void)
     return -1;
   (void)dirfd;
 
-  uint64 mode = 0100000 | 0777;
-  uint64 size = 0;
-  uint64 ino = 0;
-  char epath[MAXPATH];
-  if(resolve_ext4_path(path, epath, sizeof(epath)) &&
-     ext4_stat_by_path(FIRSTDEV, epath, &mode, &size, &ino) == 0){
-    mode |= 0777;
-  } else {
-    struct inode *ip;
-    begin_op();
-    ip = namei(path);
-    if(ip == 0){
-      end_op();
-      return -2; // ENOENT
-    }
-    ilock(ip);
-    ino = ip->inum;
-    if(ip->type == T_DIR)
-      mode = 0040000 | 0777;
-    else if(ip->type == T_DEVICE)
-      mode = 0020000 | 0777;
-    else
-      size = ip->size;
-    iunlockput(ip);
-    end_op();
+  if(vfs_redirect_proc_path(p, path, rpath, sizeof(rpath)) == 0 &&
+     vfs_stat_path(rpath, &node) == 0){
+    mode = node.mode | 0777;
+    return linux_copy_stat_time(staddr, FIRSTDEV, node.ino, mode, 1, node.size, path, 0);
   }
 
-  return linux_copy_stat_time(staddr, FIRSTDEV, ino, mode, 1, size, path, 0);
+  if(vfs_resolve_proc_path(p, path, &vp) == 0 &&
+     vp.ops && vp.ops->inode && vp.ops->inode->lookup &&
+     vp.ops->inode->lookup(vp.mount, vp.inner, &node) == 0){
+    mode = node.mode | 0777;
+    if(mode == 0777){
+      if(node.type == T_DIR)
+        mode = 0040000 | 0777;
+      else if(node.type == T_DEVICE)
+        mode = 0020000 | 0777;
+      else
+        mode = 0100000 | 0777;
+    }
+    return linux_copy_stat_time(staddr, FIRSTDEV, node.ino, mode, 1, node.size, path, 0);
+  }
+
+  return -2; // ENOENT
 }
 
 uint64
@@ -1780,6 +1662,7 @@ sys_linux_fstat(void)
 {
   struct file *f;
   uint64 staddr;
+  struct vfs_node node;
   uint64 mode = 0100000 | 0777;
   uint64 size = 0;
   struct proc *p = myproc();
@@ -1791,60 +1674,22 @@ sys_linux_fstat(void)
   if(p->is_linux == 0)
     return filestat(f, staddr);
 
-  if(f->type == FD_EXT4){
-    ext4_stat_by_path(FIRSTDEV, f->ext4_path, &mode, &size, 0);
-    mode |= 0777;
-  } else if(f->type == FD_INODE || f->type == FD_DEVICE){
-    ilock(f->ip);
-    if(f->ip->type == T_DIR)
-      mode = 0040000 | 0777;
-    else if(f->ip->type == T_DEVICE)
-      mode = 0020000 | 0777;
-    else
-      size = f->ip->size;
-    iunlock(f->ip);
+  if(vfs_file_stat_node(f, &node) == 0){
+    mode = node.mode | 0777;
+    if(mode == 0777){
+      if(node.type == T_DIR)
+        mode = 0040000 | 0777;
+      else if(node.type == T_DEVICE)
+        mode = 0020000 | 0777;
+      else
+        mode = 0100000 | 0777;
+    }
+    size = node.size;
   } else {
     mode = 0010000 | 0777;
   }
 
   return linux_copy_stat_time(staddr, FIRSTDEV, 0, mode, 1, size, 0, f);
-}
-
-static int
-dirent64_reclen(char *name)
-{
-  return (19 + strlen(name) + 1 + 7) & ~7;
-}
-
-static int
-copy_dirent64(uint64 dst, uint64 ino, uint64 off, uchar type, char *name)
-{
-  char de[280];
-  ushort reclen;
-  int namelen = strlen(name);
-
-  reclen = (ushort)dirent64_reclen(name);
-  if(reclen > sizeof(de))
-    return -1;
-  memset(de, 0, sizeof(de));
-  memmove(de + 0, &ino, sizeof(ino));
-  memmove(de + 8, &off, sizeof(off));
-  memmove(de + 16, &reclen, sizeof(reclen));
-  de[18] = type;
-  memmove(de + 19, name, namelen + 1);
-  if(copyout(myproc()->pagetable, dst, de, reclen) < 0)
-    return -1;
-  return reclen;
-}
-
-static uchar
-linux_dtype_from_ext4(uchar type)
-{
-  if(type == 2)
-    return 4; // DT_DIR
-  if(type == 1)
-    return 8; // DT_REG
-  return 0;
 }
 
 uint64
@@ -1853,68 +1698,15 @@ sys_linux_getdents64(void)
   struct file *f;
   uint64 dirp;
   int nread;
-  int n = 0;
-  int r;
 
   argaddr(1, &dirp);
   argint(2, &nread);
   if(argfd(0, 0, &f) < 0 || nread < 48)
     return -1;
 
-  if(f->type == FD_EXT4){
-    if(strncmp(myproc()->name, "busybox", 8) == 0 &&
-       strncmp(f->ext4_path, "/musl/ltp", 9) == 0 &&
-       (f->ext4_path[9] == 0 || f->ext4_path[9] == '/'))
-      return 0;
-    for(;;){
-      uint64 next, ino;
-      uchar type;
-      char name[256];
-      int ok = ext4_dirent_by_path(FIRSTDEV, f->ext4_path, f->off, &next,
-                                   &ino, &type, name, sizeof(name));
-      if(ok < 0)
-        return n > 0 ? n : -1;
-      if(ok == 0)
-        break;
-      r = dirent64_reclen(name);
-      if(r < 0 || n + r > nread)
-        break;
-      r = copy_dirent64(dirp + n, ino, next, linux_dtype_from_ext4(type), name);
-      if(r < 0)
-        break;
-      n += r;
-      f->off = next;
-    }
-    return n;
-  }
-
-  if(f->type == FD_INODE){
-    struct dirent de;
-    ilock(f->ip);
-    if(f->ip->type != T_DIR){
-      iunlock(f->ip);
-      return -1;
-    }
-    while(f->off + sizeof(de) <= f->ip->size){
-      if(readi(f->ip, 0, (uint64)&de, f->off, sizeof(de)) != sizeof(de))
-        break;
-      f->off += sizeof(de);
-      if(de.inum == 0)
-        continue;
-      de.name[DIRSIZ-1] = 0;
-      r = dirent64_reclen(de.name);
-      if(r < 0 || n + r > nread)
-        break;
-      r = copy_dirent64(dirp + n, de.inum, f->off, 0, de.name);
-      if(r < 0)
-        break;
-      n += r;
-    }
-    iunlock(f->ip);
-    return n;
-  }
-
-  return n;
+  if(f->vfs_ops && f->vfs_ops->file && f->vfs_ops->file->readdir)
+    return f->vfs_ops->file->readdir(f, dirp, nread);
+  return -1;
 }
 
 uint64
@@ -1926,24 +1718,24 @@ sys_linux_mount(void)
 uint64
 sys_linux_faccessat(void)
 {
-  char path[MAXPATH], epath[MAXPATH];
-  struct inode *ip;
+  char path[MAXPATH];
+  char rpath[MAXPATH];
+  struct vfs_path vp;
+  struct vfs_node node;
+  struct proc *p = myproc();
 
   if(argstr(1, path, MAXPATH) < 0)
     return -1;
-  if(resolve_ext4_path(path, epath, sizeof(epath)) &&
-     (ext4_path_is_reg(FIRSTDEV, epath) || ext4_path_is_dir(FIRSTDEV, epath)))
+
+  if(vfs_redirect_proc_path(p, path, rpath, sizeof(rpath)) == 0 &&
+     vfs_stat_path(rpath, &node) == 0)
     return 0;
 
-  begin_op();
-  ip = namei(path);
-  if(ip == 0){
-    end_op();
-    return -1;
-  }
-  iput(ip);
-  end_op();
-  return 0;
+  if(vfs_resolve_proc_path(p, path, &vp) == 0 &&
+     vp.ops && vp.ops->inode && vp.ops->inode->lookup &&
+     vp.ops->inode->lookup(vp.mount, vp.inner, &node) == 0)
+    return 0;
+  return -1;
 }
 
 uint64
@@ -1979,24 +1771,26 @@ uint64
 sys_mkdir(void)
 {
   char path[MAXPATH];
-  struct inode *ip;
+  char actual[MAXPATH];
+  struct vfs_path vp;
+  struct proc *p = myproc();
 
-  begin_op();
-  if(argstr(0, path, MAXPATH) < 0 || (ip = create(path, T_DIR, 0, 0)) == 0){
-    end_op();
+  if(argstr(0, path, MAXPATH) < 0)
     return -1;
-  }
-  iunlockput(ip);
-  end_op();
+  if(vfs_prepare_write_path(p, path, actual, sizeof(actual), &vp) < 0 ||
+     vp.ops == 0 || vp.ops->inode == 0 || vp.ops->inode->mkdir == 0 ||
+     vp.ops->inode->mkdir(vp.mount, vp.inner, 0) < 0)
+    return -1;
   return 0;
 }
 
 uint64
 sys_linux_mkdirat(void)
 {
-  char path[MAXPATH];
+  char path[MAXPATH], actual[MAXPATH];
   int dirfd, mode;
-  struct inode *ip;
+  struct vfs_path vp;
+  struct proc *p = myproc();
 
   argint(0, &dirfd);
   argint(2, &mode);
@@ -2005,78 +1799,61 @@ sys_linux_mkdirat(void)
 
   if(argstr(1, path, MAXPATH) < 0)
     return -1;
-  begin_op();
-  if((ip = namei(path)) != 0){
-    ilock(ip);
-    if(ip->type == T_DIR){
-      iunlockput(ip);
-      end_op();
-      return 0;
-    }
-    iunlockput(ip);
-    end_op();
+  if(vfs_prepare_write_path(p, path, actual, sizeof(actual), &vp) < 0 ||
+     vp.ops == 0 || vp.ops->inode == 0 || vp.ops->inode->mkdir == 0 ||
+     vp.ops->inode->mkdir(vp.mount, vp.inner, mode) < 0)
     return -1;
-  }
-  if((ip = create(path, T_DIR, 0, 0)) == 0){
-    end_op();
-    return -1;
-  }
-  iunlockput(ip);
-  end_op();
   return 0;
 }
 
 uint64
 sys_mknod(void)
 {
-  struct inode *ip;
-  char path[MAXPATH];
+  char path[MAXPATH], actual[MAXPATH];
   int major, minor;
+  struct vfs_path vp;
+  struct proc *p = myproc();
 
-  begin_op();
   argint(1, &major);
   argint(2, &minor);
-  if((argstr(0, path, MAXPATH)) < 0 ||
-     (ip = create(path, T_DEVICE, major, minor)) == 0){
-    end_op();
+  if(argstr(0, path, MAXPATH) < 0)
     return -1;
-  }
-  iunlockput(ip);
-  end_op();
+  if(vfs_prepare_write_path(p, path, actual, sizeof(actual), &vp) < 0 ||
+     vp.ops == 0 || vp.ops->inode == 0 || vp.ops->inode->mknod == 0 ||
+     vp.ops->inode->mknod(vp.mount, vp.inner, major, minor, 0) < 0)
+    return -1;
   return 0;
 }
 
 uint64
 sys_linux_mknodat(void)
 {
-  struct inode *ip;
-  char path[MAXPATH];
+  char path[MAXPATH], actual[MAXPATH];
   int dirfd, major, minor;
+  struct vfs_path vp;
+  struct proc *p = myproc();
 
   argint(0, &dirfd);
   argint(2, &major);
   argint(3, &minor);
   (void)dirfd;
 
-  begin_op();
-  if((argstr(1, path, MAXPATH)) < 0 ||
-     (ip = create(path, T_DEVICE, major, minor)) == 0){
-    end_op();
+  if(argstr(1, path, MAXPATH) < 0)
     return -1;
-  }
-  iunlockput(ip);
-  end_op();
+  if(vfs_prepare_write_path(p, path, actual, sizeof(actual), &vp) < 0 ||
+     vp.ops == 0 || vp.ops->inode == 0 || vp.ops->inode->mknod == 0 ||
+     vp.ops->inode->mknod(vp.mount, vp.inner, major, minor, 0) < 0)
+    return -1;
   return 0;
 }
 
 uint64
 sys_linux_unlinkat(void)
 {
-  struct inode *ip, *dp;
-  struct dirent de;
-  char name[DIRSIZ], path[MAXPATH];
-  uint off;
+  char path[MAXPATH], actual[MAXPATH];
   int dirfd, flags;
+  struct vfs_path vp;
+  struct proc *p = myproc();
 
   argint(0, &dirfd);
   argint(2, &flags);
@@ -2085,58 +1862,20 @@ sys_linux_unlinkat(void)
 
   if(argstr(1, path, MAXPATH) < 0)
     return -1;
-
-  begin_op();
-  if((dp = nameiparent(path, name)) == 0){
-    end_op();
+  if(vfs_prepare_write_path(p, path, actual, sizeof(actual), &vp) < 0 ||
+     vp.ops == 0 || vp.ops->inode == 0 || vp.ops->inode->unlink == 0 ||
+     vp.ops->inode->unlink(vp.mount, vp.inner) < 0)
     return -1;
-  }
-
-  ilock(dp);
-
-  if(namecmp(name, ".") == 0 || namecmp(name, "..") == 0)
-    goto bad;
-
-  if((ip = dirlookup(dp, name, &off)) == 0)
-    goto bad;
-  ilock(ip);
-
-  if(ip->nlink < 1)
-    panic("unlink: nlink < 1");
-  if(ip->type == T_DIR && !isdirempty(ip)){
-    iunlockput(ip);
-    goto bad;
-  }
-
-  memset(&de, 0, sizeof(de));
-  if(writei(dp, 0, (uint64)&de, off, sizeof(de)) != sizeof(de))
-    panic("unlink: writei");
-  if(ip->type == T_DIR){
-    dp->nlink--;
-    iupdate(dp);
-  }
-  iunlockput(dp);
-
-  ip->nlink--;
-  iupdate(ip);
-  iunlockput(ip);
-
-  end_op();
-
   return 0;
-
-bad:
-  iunlockput(dp);
-  end_op();
-  return -1;
 }
 
 uint64
 sys_linux_linkat(void)
 {
-  char name[DIRSIZ], new[MAXPATH], old[MAXPATH];
-  struct inode *dp, *ip;
+  char new[MAXPATH], old[MAXPATH], actual_old[MAXPATH], actual_new[MAXPATH];
   int olddirfd, newdirfd, flags;
+  struct vfs_path oldvp, newvp;
+  struct proc *p = myproc();
 
   argint(0, &olddirfd);
   argint(2, &newdirfd);
@@ -2147,55 +1886,23 @@ sys_linux_linkat(void)
 
   if(argstr(1, old, MAXPATH) < 0 || argstr(3, new, MAXPATH) < 0)
     return -1;
-
-  begin_op();
-  if((ip = namei(old)) == 0){
-    end_op();
+  if(vfs_prepare_write_path(p, old, actual_old, sizeof(actual_old), &oldvp) < 0 ||
+     vfs_prepare_write_path(p, new, actual_new, sizeof(actual_new), &newvp) < 0)
     return -1;
-  }
-
-  ilock(ip);
-  if(ip->type == T_DIR){
-    iunlockput(ip);
-    end_op();
+  if(oldvp.mount != newvp.mount ||
+     oldvp.ops == 0 || oldvp.ops->inode == 0 || oldvp.ops->inode->link == 0 ||
+     oldvp.ops->inode->link(oldvp.mount, oldvp.inner, newvp.inner) < 0)
     return -1;
-  }
-
-  ip->nlink++;
-  iupdate(ip);
-  iunlock(ip);
-
-  if((dp = nameiparent(new, name)) == 0)
-    goto bad;
-  ilock(dp);
-  if(dp->dev != ip->dev || dirlink(dp, name, ip->inum) < 0){
-    iunlockput(dp);
-    goto bad;
-  }
-  iunlockput(dp);
-  iput(ip);
-
-  end_op();
-
   return 0;
-
-bad:
-  ilock(ip);
-  ip->nlink--;
-  iupdate(ip);
-  iunlockput(ip);
-  end_op();
-  return -1;
 }
 
 uint64
 sys_linux_renameat(void)
 {
-  char old[MAXPATH], new[MAXPATH], oldname[DIRSIZ], newname[DIRSIZ];
+  char old[MAXPATH], new[MAXPATH], actual_old[MAXPATH], actual_new[MAXPATH];
   int olddirfd, newdirfd;
-  struct inode *olddp, *newdp, *ip, *exist;
-  struct dirent de;
-  uint off;
+  struct vfs_path oldvp, newvp;
+  struct proc *p = myproc();
 
   argint(0, &olddirfd);
   argint(2, &newdirfd);
@@ -2203,101 +1910,36 @@ sys_linux_renameat(void)
   (void)newdirfd;
   if(argstr(1, old, MAXPATH) < 0 || argstr(3, new, MAXPATH) < 0)
     return -1;
-
-  begin_op();
-  if((olddp = nameiparent(old, oldname)) == 0){
-    end_op();
+  if(vfs_prepare_write_path(p, old, actual_old, sizeof(actual_old), &oldvp) < 0 ||
+     vfs_prepare_write_path(p, new, actual_new, sizeof(actual_new), &newvp) < 0)
     return -1;
-  }
-  if((newdp = nameiparent(new, newname)) == 0){
-    iput(olddp);
-    end_op();
+  if(oldvp.mount != newvp.mount ||
+     oldvp.ops == 0 || oldvp.ops->inode == 0 || oldvp.ops->inode->rename == 0 ||
+     oldvp.ops->inode->rename(oldvp.mount, oldvp.inner, newvp.inner) < 0)
     return -1;
-  }
-
-  if(olddp->dev != newdp->dev || olddp->inum != newdp->inum ||
-     strlen(newname) >= DIRSIZ){
-    iput(newdp);
-    iput(olddp);
-    end_op();
-    return -1;
-  }
-  iput(newdp);
-
-  ilock(olddp);
-  if((ip = dirlookup(olddp, oldname, &off)) == 0)
-    goto bad;
-
-  if((exist = dirlookup(olddp, newname, 0)) != 0){
-    ilock(exist);
-    if(exist->type == T_DIR && !isdirempty(exist)){
-      iunlockput(exist);
-      iput(ip);
-      goto bad;
-    }
-    iunlockput(exist);
-  }
-
-  memset(&de, 0, sizeof(de));
-  de.inum = ip->inum;
-  strncpy(de.name, newname, DIRSIZ);
-  if(writei(olddp, 0, (uint64)&de, off, sizeof(de)) != sizeof(de))
-    panic("renameat: writei");
-  iput(ip);
-  iunlockput(olddp);
-  end_op();
   return 0;
-
-bad:
-  iunlockput(olddp);
-  end_op();
-  return -1;
 }
 
 uint64
 sys_chdir(void)
 {
   char path[MAXPATH];
-  char epath[MAXPATH];
-  struct inode *ip;
+  struct vfs_path vp;
+  struct vfs_node node;
   struct proc *p = myproc();
   
   if(argstr(0, path, MAXPATH) < 0)
     return -1;
 
-  if(path[0] != '/' && p->cwd_is_ext4 &&
-     resolve_ext4_path(path, epath, sizeof(epath)) &&
-     ext4_path_is_dir(FIRSTDEV, epath)){
-    safestrcpy(p->ext4_cwd, epath, sizeof(p->ext4_cwd));
-    return 0;
-  }
+  if(vfs_resolve_proc_path(p, path, &vp) < 0 ||
+     vp.ops == 0 || vp.ops->inode == 0 || vp.ops->inode->lookup == 0 ||
+     vp.ops->inode->lookup(vp.mount, vp.inner, &node) < 0 ||
+     node.type != T_DIR)
+    return -1;
 
-  begin_op();
-  if((ip = namei(path)) != 0){
-    ilock(ip);
-    if(ip->type != T_DIR){
-      iunlockput(ip);
-      end_op();
-      return -1;
-    }
-    iunlock(ip);
-    iput(p->cwd);
-    end_op();
-    p->cwd = ip;
-    p->cwd_is_ext4 = 0;
-    safestrcpy(p->ext4_cwd, "/", sizeof(p->ext4_cwd));
-    return 0;
-  }
-  end_op();
-
-  if(resolve_ext4_path(path, epath, sizeof(epath)) &&
-     ext4_path_is_dir(FIRSTDEV, epath)){
-    p->cwd_is_ext4 = 1;
-    safestrcpy(p->ext4_cwd, epath, sizeof(p->ext4_cwd));
-    return 0;
-  }
-
-  return -1;
+  if(vfs_set_proc_cwd(p, vp.abs_path) < 0)
+    return -1;
+  return vfs_sync_legacy_cwd(p, &vp);
 }
 
 uint64
@@ -2314,10 +1956,8 @@ sys_linux_getcwd(void)
   if(size <= 0)
     return -1;
 
-  if(p->cwd_is_ext4)
-    safestrcpy(path, p->ext4_cwd, sizeof(path));
-  else
-    safestrcpy(path, "/", sizeof(path));
+  if(vfs_proc_cwd_path(p, path, sizeof(path)) < 0)
+    return -1;
   n = strlen(path) + 1;
   if(n > size)
     return -1;
