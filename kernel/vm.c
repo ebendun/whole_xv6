@@ -21,20 +21,12 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 extern char trampoline[]; // trampoline.S
 extern struct proc proc[NPROC];
 
-static struct proc *
-linux_vm_leader(struct proc *p)
-{
-  while(p && p->linux_share_vm && p->parent)
-    p = p->parent;
-  return p;
-}
-
 static int
 linux_same_vm_group(struct proc *a, struct proc *b)
 {
   if(a == 0 || b == 0)
     return 0;
-  return linux_vm_leader(a) == linux_vm_leader(b);
+  return linux_tgid(a) == linux_tgid(b);
 }
 
 static int

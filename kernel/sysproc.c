@@ -169,8 +169,8 @@ uint64
 sys_getpid(void)
 {
   struct proc *p = myproc();
-  if(p->is_linux && p->linux_share_vm && p->parent)
-    return p->parent->pid;
+  if(p->linux_tgid != 0)
+    return linux_tgid(p);
   return p->pid;
 }
 
@@ -196,7 +196,8 @@ sys_linux_clone(void)
     tls = 0;
 
   pid = kclone(stack, tls, (flags & 0x200000) ? ctid : 0,
-               (flags & 0x100) != 0, (flags & 0x400) != 0);
+               (flags & 0x100) != 0, (flags & 0x400) != 0,
+               (flags & 0x200) != 0, (flags & 0x10000) != 0);
   if(pid > 0 && (flags & 0x100000) && ptid != 0){
     int tid = pid;
     copyout(myproc()->pagetable, ptid, (char *)&tid, sizeof(tid));
@@ -247,6 +248,7 @@ sys_sbrk(void)
     if(addr + n < addr)
       return -1;
     myproc()->sz += n;
+    linux_sync_vm_size(myproc());
   }
   return addr;
 }
@@ -271,6 +273,7 @@ sys_linux_brk(void)
       return p->linux_brk;
   }
   p->linux_brk = addr;
+  linux_sync_vm_size(p);
   return p->linux_brk;
 }
 
@@ -657,10 +660,15 @@ sys_linux_futex(void)
 uint64
 sys_linux_tgkill(void)
 {
-  int tid, sig;
+  int tgid, tid, sig;
 
+  argint(0, &tgid);
   argint(1, &tid);
   argint(2, &sig);
+  for(struct proc *p = proc; p < &proc[NPROC]; p++){
+    if(p->state != UNUSED && p->pid == tid && linux_tgid(p) != tgid)
+      return -1;
+  }
   linux_interrupt(tid, sig >= 32, myproc()->pid);
   return 0;
 }
@@ -731,7 +739,7 @@ sys_linux_exit_group(void)
 {
   int n;
   argint(0, &n);
-  kexit(n);
+  kexit_group(n);
   return 0;
 }
 

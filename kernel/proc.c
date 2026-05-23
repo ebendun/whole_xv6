@@ -23,6 +23,132 @@ extern void forkret(void);
 static void freeproc(struct proc *p);
 static int vmawriteback(struct proc *p, struct vma *v, uint64 addr, uint64 len);
 
+static struct proc *
+linux_group_leader(struct proc *p)
+{
+  if(p == 0)
+    return 0;
+  if(p->linux_group_leader)
+    return p->linux_group_leader;
+  return p;
+}
+
+int
+linux_tgid(struct proc *p)
+{
+  if(p == 0)
+    return -1;
+  return p->linux_tgid ? p->linux_tgid : p->pid;
+}
+
+static int
+linux_same_thread_group(struct proc *a, struct proc *b)
+{
+  return a && b && linux_tgid(a) == linux_tgid(b);
+}
+
+static void
+linux_clear_child_tid(struct proc *p)
+{
+  if(p->clear_child_tid == 0)
+    return;
+
+  int zero = 0;
+  uint64 pa = walkaddr(p->pagetable, p->clear_child_tid);
+  if(pa != 0)
+    memmove((void *)pa, &zero, sizeof(zero));
+
+  for(struct proc *q = proc; q < &proc[NPROC]; q++){
+    if(q == p || q->state == UNUSED || q->pagetable == 0)
+      continue;
+    if(!linux_same_thread_group(p, q))
+      continue;
+    pa = walkaddr(q->pagetable, p->clear_child_tid);
+    if(pa != 0)
+      memmove((void *)pa, &zero, sizeof(zero));
+  }
+
+  linux_futex_wake(p->clear_child_tid);
+}
+
+static void
+linux_drop_vma_refs(struct proc *p)
+{
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used && p->vmas[i].f)
+      fileclose(p->vmas[i].f);
+  }
+  memset(p->vmas, 0, sizeof(p->vmas));
+}
+
+static void
+proc_close_files(struct proc *p)
+{
+  for(int fd = 0; fd < NOFILE; fd++){
+    if(p->ofile[fd]){
+      struct file *f = p->ofile[fd];
+      p->ofile[fd] = 0;
+      fileclose(f);
+    }
+  }
+}
+
+static void
+proc_put_cwd(struct proc *p)
+{
+  if(p->cwd == 0)
+    return;
+
+  begin_op();
+  iput(p->cwd);
+  end_op();
+  p->cwd = 0;
+}
+
+static void
+linux_sync_fd_to_group(struct proc *src, int fd)
+{
+  if(src == 0 || src->linux_share_files == 0 || fd < 0 || fd >= NOFILE)
+    return;
+
+  for(struct proc *q = proc; q < &proc[NPROC]; q++){
+    if(q == src || q->state == UNUSED || q->linux_share_files == 0)
+      continue;
+    if(!linux_same_thread_group(src, q))
+      continue;
+    if(q->ofile[fd]){
+      fileclose(q->ofile[fd]);
+      q->ofile[fd] = 0;
+    }
+    if(src->ofile[fd])
+      q->ofile[fd] = filedup(src->ofile[fd]);
+  }
+}
+
+void
+linux_sync_file_table(struct proc *src)
+{
+  for(int fd = 0; fd < NOFILE; fd++)
+    linux_sync_fd_to_group(src, fd);
+}
+
+void
+linux_sync_vm_size(struct proc *src)
+{
+  if(src == 0 || src->linux_share_vm == 0)
+    return;
+
+  for(struct proc *q = proc; q < &proc[NPROC]; q++){
+    if(q == src || q->state == UNUSED)
+      continue;
+    if(!linux_same_thread_group(src, q))
+      continue;
+    q->sz = src->sz;
+    q->linux_brk = src->linux_brk;
+    q->linux_brk_limit = src->linux_brk_limit;
+  }
+}
+
 static int
 copy_mapped_vma_pages(struct proc *src, struct proc *dst)
 {
@@ -193,6 +319,13 @@ found:
   p->linux_in_signal = 0;
   p->linux_share_vm = 0;
   p->linux_share_files = 0;
+  p->linux_share_fs = 0;
+  p->linux_is_thread = 0;
+  p->linux_tgid = p->pid;
+  p->linux_group_exiting = 0;
+  p->linux_group_xstate = 0;
+  p->linux_thread_count = 1;
+  p->linux_group_leader = p;
   p->linux_sigcancel_handler = 0;
   p->linux_sigmask = 0;
   memset(p->vmas, 0, sizeof(p->vmas));
@@ -271,6 +404,13 @@ freeproc(struct proc *p)
   p->linux_in_signal = 0;
   p->linux_share_vm = 0;
   p->linux_share_files = 0;
+  p->linux_share_fs = 0;
+  p->linux_is_thread = 0;
+  p->linux_tgid = 0;
+  p->linux_group_exiting = 0;
+  p->linux_group_xstate = 0;
+  p->linux_thread_count = 0;
+  p->linux_group_leader = 0;
   p->linux_sigcancel_handler = 0;
   p->linux_sigmask = 0;
   p->linux_brk = 0;
@@ -330,6 +470,8 @@ linux_interrupt(int pid, int deliver_sigcancel, int sender)
 static struct proc *
 linux_thread_leader(struct proc *p)
 {
+  if(p && p->linux_group_leader)
+    return p->linux_group_leader;
   while(p && p->linux_share_vm && p->parent)
     p = p->parent;
   return p;
@@ -704,10 +846,10 @@ userinit(void)
 int
 growproc(int n)
 {
-  uint64 sz;
+  uint64 oldsz, sz;
   struct proc *p = myproc();
 
-  sz = p->sz;
+  oldsz = sz = p->sz;
   if(n > 0){
     if((sz = uvmalloc(p->pagetable, sz, sz + n, PTE_W)) == 0) {
       return -1;
@@ -716,13 +858,34 @@ growproc(int n)
     sz = uvmdealloc(p->pagetable, sz, sz + n);
   }
   p->sz = sz;
+  if(p->linux_share_vm){
+    for(struct proc *q = proc; q < &proc[NPROC]; q++){
+      if(q == p || q->state == UNUSED || !linux_same_thread_group(p, q))
+        continue;
+      if(n > 0){
+        for(uint64 a = PGROUNDUP(oldsz); a < sz; a += PGSIZE){
+          pte_t *pte = walk(p->pagetable, a, 0);
+          if(pte == 0 || (*pte & PTE_V) == 0)
+            continue;
+          if(walkaddr(q->pagetable, a) == 0 &&
+             mappages(q->pagetable, a, PGSIZE, PTE2PA(*pte), PTE_FLAGS(*pte)) == 0)
+            kref_inc(PTE2PA(*pte));
+        }
+      } else if(n < 0 && PGROUNDUP(sz) < PGROUNDUP(oldsz)){
+        uvmunmap(q->pagetable, PGROUNDUP(sz),
+                 (PGROUNDUP(oldsz) - PGROUNDUP(sz)) / PGSIZE, 1);
+      }
+    }
+    linux_sync_vm_size(p);
+  }
   return 0;
 }
 
 // Create a new process, copying the parent.
 // Sets up child kernel stack to return as if from fork() system call.
 static int
-forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, int share_vm, int share_files)
+forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, int share_vm,
+       int share_files, int share_fs, int clone_thread)
 {
   int i, pid;
   struct proc *np;
@@ -732,6 +895,7 @@ forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, int share_vm, int share
   if((np = allocproc()) == 0){
     return -1;
   }
+  pid = np->pid;
   
   // Copy normal processes with COW. Linux CLONE_VM threads instead get
   // distinct page tables whose user PTEs point at the same physical pages.
@@ -774,8 +938,7 @@ forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, int share_vm, int share
   np->is_linux = p->is_linux;
   np->linux_share_vm = share_vm;
   np->linux_share_files = share_files;
-  if(share_files)
-    p->linux_share_files = 1;
+  np->linux_share_fs = share_fs;
   np->linux_sigcancel_handler = p->linux_sigcancel_handler;
   np->linux_sigmask = p->linux_sigmask;
   np->linux_brk = p->linux_brk;
@@ -787,14 +950,35 @@ forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, int share_vm, int share
   }
   if((share_vm ? share_mapped_vma_pages(p, np)
                : copy_mapped_vma_pages(p, np)) < 0){
+    linux_drop_vma_refs(np);
+    proc_close_files(np);
+    proc_put_cwd(np);
     freeproc(np);
     release(&np->lock);
     return -1;
   }
 
-  safestrcpy(np->name, p->name, sizeof(p->name));
+  np->linux_is_thread = clone_thread;
+  if(clone_thread){
+    struct proc *leader = linux_group_leader(p);
+    np->linux_group_leader = leader;
+    np->linux_tgid = linux_tgid(leader);
+    np->linux_group_exiting = leader->linux_group_exiting;
+    np->linux_group_xstate = leader->linux_group_xstate;
+    leader->linux_thread_count++;
+  } else {
+    np->linux_group_leader = np;
+    np->linux_tgid = pid;
+    np->linux_group_exiting = 0;
+    np->linux_group_xstate = 0;
+    np->linux_thread_count = 1;
+  }
+  if(share_files)
+    p->linux_share_files = 1;
+  if(share_fs)
+    p->linux_share_fs = 1;
 
-  pid = np->pid;
+  safestrcpy(np->name, p->name, sizeof(p->name));
 
   release(&np->lock);
   
@@ -813,13 +997,15 @@ forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, int share_vm, int share
 int
 kfork(void)
 {
-  return forkat(0, 0, 0, 0, 0);
+  return forkat(0, 0, 0, 0, 0, 0, 0);
 }
 
 int
-kclone(uint64 stack, uint64 tls, uint64 clear_child_tid, int share_vm, int share_files)
+kclone(uint64 stack, uint64 tls, uint64 clear_child_tid, int share_vm,
+       int share_files, int share_fs, int clone_thread)
 {
-  return forkat(stack, tls, clear_child_tid, share_vm, share_files);
+  return forkat(stack, tls, clear_child_tid, share_vm, share_files, share_fs,
+                clone_thread);
 }
 
 // Pass p's abandoned children to init.
@@ -844,51 +1030,42 @@ void
 kexit(int status)
 {
   struct proc *p = myproc();
+  struct proc *leader = linux_group_leader(p);
+  int thread_only = leader && leader->linux_thread_count > 1;
+  int group_dead = 1;
 
   if(p == initproc)
     panic("init exiting");
 
-  if(p->clear_child_tid != 0){
-    int zero = 0;
-    uint64 pa = walkaddr(p->pagetable, p->clear_child_tid);
-    if(pa != 0)
-      memmove((void *)pa, &zero, sizeof(zero));
-    if(p->parent){
-      pa = walkaddr(p->parent->pagetable, p->clear_child_tid);
-      if(pa != 0)
-        memmove((void *)pa, &zero, sizeof(zero));
-    }
-    linux_futex_wake(p->clear_child_tid);
-  }
+  linux_clear_child_tid(p);
 
-  proc_munmapall(p);
+  if(!thread_only)
+    proc_munmapall(p);
+  else
+    linux_drop_vma_refs(p);
 
   // Close all open files.
-  for(int fd = 0; fd < NOFILE; fd++){
-    if(p->ofile[fd]){
-      struct file *f = p->ofile[fd];
-      fileclose(f);
-      p->ofile[fd] = 0;
-    }
-  }
+  proc_close_files(p);
 
-  
-  begin_op();
-  iput(p->cwd);
-  end_op();
-  p->cwd = 0;
+  proc_put_cwd(p);
 
   acquire(&wait_lock);
 
-  // Give any children to init.
-  reparent(p);
+  if(leader && leader->linux_thread_count > 0)
+    leader->linux_thread_count--;
+  if(leader)
+    group_dead = leader->linux_thread_count == 0;
+
+  if(group_dead)
+    reparent(leader ? leader : p);
 
   // Parent might be sleeping in wait().
-  wakeup(p->parent);
+  if(group_dead)
+    wakeup(leader ? leader->parent : p->parent);
   
   acquire(&p->lock);
 
-  p->xstate = status;
+  p->xstate = leader && leader->linux_group_exiting ? leader->linux_group_xstate : status;
   p->state = ZOMBIE;
 
   release(&wait_lock);
@@ -896,6 +1073,35 @@ kexit(int status)
   // Jump into the scheduler, never to return.
   sched();
   panic("zombie exit");
+}
+
+void
+kexit_group(int status)
+{
+  struct proc *p = myproc();
+  struct proc *leader = linux_group_leader(p);
+
+  acquire(&wait_lock);
+  if(leader){
+    leader->linux_group_exiting = 1;
+    leader->linux_group_xstate = status;
+  }
+  for(struct proc *q = proc; q < &proc[NPROC]; q++){
+    if(q == p || q->state == UNUSED)
+      continue;
+    if(!linux_same_thread_group(p, q))
+      continue;
+    acquire(&q->lock);
+    q->linux_group_exiting = 1;
+    q->linux_group_xstate = status;
+    q->killed = 1;
+    if(q->state == SLEEPING)
+      q->state = RUNNABLE;
+    release(&q->lock);
+  }
+  release(&wait_lock);
+
+  kexit(status);
 }
 
 // Wait for a child process to exit and return its pid.
@@ -914,11 +1120,13 @@ kwait(uint64 addr)
     havekids = 0;
     for(pp = proc; pp < &proc[NPROC]; pp++){
       if(pp->parent == p){
+        if(linux_same_thread_group(pp, p))
+          continue;
         // make sure the child isn't still in exit() or swtch().
         acquire(&pp->lock);
 
         havekids = 1;
-        if(pp->state == ZOMBIE){
+        if(pp->state == ZOMBIE && pp->linux_thread_count == 0){
           // Found one.
           pid = pp->pid;
           if(addr != 0 && copyout(p->pagetable, addr, (char *)&pp->xstate,
@@ -961,9 +1169,11 @@ kwait_options(uint64 addr, int options)
   havekids = 0;
   for(pp = proc; pp < &proc[NPROC]; pp++){
     if(pp->parent == p){
+      if(linux_same_thread_group(pp, p))
+        continue;
       acquire(&pp->lock);
       havekids = 1;
-      if(pp->state == ZOMBIE){
+      if(pp->state == ZOMBIE && pp->linux_thread_count == 0){
         pid = pp->pid;
         if(addr != 0 && copyout(p->pagetable, addr, (char *)&pp->xstate,
                                 sizeof(pp->xstate)) < 0){
@@ -997,9 +1207,11 @@ kwait_linux(uint64 addr)
     havekids = 0;
     for(pp = proc; pp < &proc[NPROC]; pp++){
       if(pp->parent == p){
+        if(linux_same_thread_group(pp, p))
+          continue;
         acquire(&pp->lock);
         havekids = 1;
-        if(pp->state == ZOMBIE){
+        if(pp->state == ZOMBIE && pp->linux_thread_count == 0){
           int status = pp->xstate << 8;
           pid = pp->pid;
           if(addr != 0 && copyout(p->pagetable, addr, (char *)&status,
@@ -1052,6 +1264,11 @@ scheduler(void)
       acquire(&p->lock);
       if(p->state != UNUSED) {
         nproc++;
+      }
+      if(p->state == ZOMBIE && linux_group_leader(p) != p){
+        freeproc(p);
+        release(&p->lock);
+        continue;
       }
       if(p->pincpu && p->pincpu != c) {
         release(&p->lock);
@@ -1257,21 +1474,23 @@ int
 kkill(int pid)
 {
   struct proc *p;
+  int killed_any = 0;
 
   for(p = proc; p < &proc[NPROC]; p++){
     acquire(&p->lock);
-    if(p->pid == pid){
+    if(p->pid == pid || linux_tgid(p) == pid){
       p->killed = 1;
       if(p->state == SLEEPING){
         // Wake process from sleep().
         p->state = RUNNABLE;
       }
       release(&p->lock);
-      return 0;
+      killed_any = 1;
+      continue;
     }
     release(&p->lock);
   }
-  return -1;
+  return killed_any ? 0 : -1;
 }
 
 void

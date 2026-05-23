@@ -129,6 +129,13 @@ struct proc {
   int linux_in_signal;         // currently running a Linux signal handler
   int linux_share_vm;          // Linux CLONE_VM-style shared user memory
   int linux_share_files;       // Linux CLONE_FILES-style shared fd table
+  int linux_share_fs;          // Linux CLONE_FS-style shared cwd/root state
+  int linux_is_thread;         // Linux CLONE_THREAD-style task
+  int linux_tgid;              // Linux thread-group id; pid for normal procs
+  int linux_group_exiting;     // thread group is being torn down
+  int linux_group_xstate;      // status supplied to exit_group
+  int linux_thread_count;      // live tasks, meaningful on group leader
+  struct proc *linux_group_leader; // leader of this Linux thread group
   uint64 linux_sigcancel_handler; // handler installed for Linux SIGCANCEL
   uint64 linux_sigmask;        // Linux blocked signal mask
   uint64 linux_brk;            // Current Linux ABI program break

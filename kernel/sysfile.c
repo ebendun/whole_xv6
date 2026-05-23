@@ -27,6 +27,7 @@ static int vfs_stat_path(char *path, struct vfs_node *node);
 static int vfs_prepare_write_path(struct proc *p, char *path, char *actual,
                                   int actualsz, struct vfs_path *vp);
 static int vfs_sync_legacy_cwd(struct proc *p, struct vfs_path *vp);
+static void linux_sync_fs_to_group(struct proc *src, struct vfs_path *vp);
 extern struct proc proc[NPROC];
 
 static struct spinlock linux_socket_lock;
@@ -99,25 +100,16 @@ linux_utime_find(char *path, int alloc)
   return 0;
 }
 
-static struct proc *
-linux_vm_leader_file(struct proc *p)
-{
-  while(p && p->linux_share_vm && p->parent)
-    p = p->parent;
-  return p;
-}
-
 static void
 linux_share_vma_to_group(struct proc *p, struct vma *v)
 {
-  if(p->is_linux == 0)
+  if(p->linux_share_vm == 0)
     return;
 
-  struct proc *leader = linux_vm_leader_file(p);
   for(struct proc *q = proc; q < &proc[NPROC]; q++){
     if(q == p || q->state == UNUSED || q->pagetable == 0)
       continue;
-    if(linux_vm_leader_file(q) != leader)
+    if(linux_tgid(q) != linux_tgid(p))
       continue;
     q->mmap_base = p->mmap_base;
     for(int i = 0; i < NVMA; i++){
@@ -160,8 +152,7 @@ fdalloc(struct file *f)
   for(fd = 0; fd < NOFILE; fd++){
     if(p->ofile[fd] == 0){
       p->ofile[fd] = f;
-      if(p->linux_share_files && p->parent && p->parent->ofile[fd] == 0)
-        p->parent->ofile[fd] = filedup(f);
+      linux_sync_file_table(p);
       return fd;
     }
   }
@@ -276,6 +267,7 @@ sys_linux_dup3(void)
     p->ofile[newfd] = 0;
   }
   p->ofile[newfd] = filedup(f);
+  linux_sync_file_table(p);
   return newfd;
 }
 
@@ -301,6 +293,7 @@ sys_linux_fcntl(void)
     for(int newfd = arg; newfd < NOFILE; newfd++){
       if(p->ofile[newfd] == 0){
         p->ofile[newfd] = filedup(f);
+        linux_sync_file_table(p);
         return newfd;
       }
     }
@@ -633,6 +626,7 @@ sys_close(void)
   if(argfd(0, &fd, &f) < 0)
     return -1;
   myproc()->ofile[fd] = 0;
+  linux_sync_file_table(myproc());
   fileclose(f);
   return 0;
 }
@@ -646,20 +640,10 @@ sys_linux_close(void)
   struct proc *p = myproc();
   argint(0, &fd);
   if(argfd(0, &fd, &f) < 0){
-    if(p->linux_share_files && p->parent && fd >= 0 && fd < NOFILE &&
-       (f = p->parent->ofile[fd]) != 0){
-      p->parent->ofile[fd] = 0;
-      fileclose(f);
-      return 0;
-    }
     return -9; // EBADF
   }
   p->ofile[fd] = 0;
-  if(p->linux_share_files && p->parent && p->parent->ofile[fd]){
-    struct file *pf = p->parent->ofile[fd];
-    p->parent->ofile[fd] = 0;
-    fileclose(pf);
-  }
+  linux_sync_file_table(p);
   fileclose(f);
   return 0;
 }
@@ -881,12 +865,11 @@ sys_linux_mprotect(void)
   if(linux_mprotect_one(p, start, end, prot) < 0)
     return -1;
 
-  if(p->is_linux){
-    struct proc *leader = linux_vm_leader_file(p);
+  if(p->linux_share_vm){
     for(struct proc *q = proc; q < &proc[NPROC]; q++){
       if(q == p || q->state == UNUSED || q->pagetable == 0)
         continue;
-      if(linux_vm_leader_file(q) == leader)
+      if(linux_tgid(q) == linux_tgid(p))
         linux_mprotect_one(q, start, end, prot);
     }
   }
@@ -1049,6 +1032,22 @@ vfs_sync_legacy_cwd(struct proc *p, struct vfs_path *vp)
 
   p->cwd = ip;
   return 0;
+}
+
+static void
+linux_sync_fs_to_group(struct proc *src, struct vfs_path *vp)
+{
+  if(src == 0 || src->linux_share_fs == 0)
+    return;
+
+  for(struct proc *q = proc; q < &proc[NPROC]; q++){
+    if(q == src || q->state == UNUSED || q->linux_share_fs == 0)
+      continue;
+    if(linux_tgid(q) != linux_tgid(src))
+      continue;
+    vfs_set_proc_cwd(q, src->vfs_cwd.abs_path);
+    vfs_sync_legacy_cwd(q, vp);
+  }
 }
 
 uint64
@@ -1932,7 +1931,10 @@ sys_chdir(void)
 
   if(vfs_set_proc_cwd(p, vp.abs_path) < 0)
     return -1;
-  return vfs_sync_legacy_cwd(p, &vp);
+  if(vfs_sync_legacy_cwd(p, &vp) < 0)
+    return -1;
+  linux_sync_fs_to_group(p, &vp);
+  return 0;
 }
 
 uint64
@@ -2005,7 +2007,7 @@ sys_exec(void)
 uint64
 sys_linux_execve(void)
 {
-  char path[MAXPATH], *argv[MAXARG];
+  char path[MAXPATH], binpath[MAXPATH], *argv[MAXARG];
   int i;
   uint64 uargv, uarg;
 
@@ -2031,6 +2033,20 @@ sys_linux_execve(void)
   }
 
   int ret = kexec(path, argv);
+  if(ret < 0 && path[0] != '/' && strlen(path) + 6 < sizeof(binpath)){
+    int has_slash = 0;
+    for(char *s = path; *s; s++){
+      if(*s == '/'){
+        has_slash = 1;
+        break;
+      }
+    }
+    if(has_slash == 0){
+      safestrcpy(binpath, "/bin/", sizeof(binpath));
+      safestrcpy(binpath + 5, path, sizeof(binpath) - 5);
+      ret = kexec(binpath, argv);
+    }
+  }
 
   for(i = 0; i < NELEM(argv) && argv[i] != 0; i++)
     kfree(argv[i]);
@@ -2056,9 +2072,13 @@ sys_pipe(void)
     return -1;
   fd0 = -1;
   if((fd0 = fdalloc(rf)) < 0 || (fd1 = fdalloc(wf)) < 0){
-    if(fd0 >= 0)
+    if(fd0 >= 0){
       p->ofile[fd0] = 0;
-    fileclose(rf);
+      rf = 0;
+    }
+    linux_sync_file_table(p);
+    if(rf)
+      fileclose(rf);
     fileclose(wf);
     return -1;
   }
@@ -2066,8 +2086,7 @@ sys_pipe(void)
      copyout(p->pagetable, fdarray+sizeof(fd0), (char *)&fd1, sizeof(fd1)) < 0){
     p->ofile[fd0] = 0;
     p->ofile[fd1] = 0;
-    fileclose(rf);
-    fileclose(wf);
+    linux_sync_file_table(p);
     return -1;
   }
   return 0;

@@ -97,8 +97,12 @@ void            backtrace(void);
 // proc.c
 int             cpuid(void);
 void            kexit(int);
+void            kexit_group(int);
 int             kfork(void);
-int             kclone(uint64, uint64, uint64, int, int);
+int             kclone(uint64, uint64, uint64, int, int, int, int);
+int             linux_tgid(struct proc *);
+void            linux_sync_file_table(struct proc *);
+void            linux_sync_vm_size(struct proc *);
 void            linux_futex_wake(uint64);
 void            linux_interrupt(int, int, int);
 void            linux_set_sigcancel_handler(uint64);

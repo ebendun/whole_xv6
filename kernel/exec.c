@@ -27,6 +27,7 @@
 #define AT_RANDOM 25
 
 static int loadseg_file(pde_t *, uint64, struct file *, uint, uint);
+extern struct proc proc[NPROC];
 
 static int
 exec_open_vfs(char *path, struct vfs_path *vp, struct file **fp)
@@ -406,6 +407,23 @@ kexec(char *path, char **argv)
   safestrcpy(p->name, last, sizeof(p->name));
     
   // Commit to the user image.
+  if(p->is_linux){
+    for(struct proc *q = proc; q < &proc[NPROC]; q++){
+      if(q == p || q->state == UNUSED || linux_tgid(q) != linux_tgid(p))
+        continue;
+      acquire(&q->lock);
+      q->killed = 1;
+      if(q->state == SLEEPING)
+        q->state = RUNNABLE;
+      release(&q->lock);
+    }
+    p->linux_is_thread = 0;
+    p->linux_group_leader = p;
+    p->linux_tgid = p->pid;
+    p->linux_thread_count = 1;
+    p->linux_group_exiting = 0;
+    p->linux_group_xstate = 0;
+  }
   oldpagetable = p->pagetable;
   proc_munmapall(p);
   p->pagetable = pagetable;

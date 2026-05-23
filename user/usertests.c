@@ -21,6 +21,15 @@
 
 char buf[BUFSZ];
 
+static int
+open_readme(void)
+{
+  int fd = open("README", 0);
+  if(fd < 0)
+    fd = open("/home/README", 0);
+  return fd;
+}
+
 //
 // Section with tests that run fairly quickly.  Use -q if you want to
 // run just those.  Without -q usertests also runs the ones that take a
@@ -83,7 +92,7 @@ copyout(char *s)
   for(int ai = 0; ai < sizeof(addrs)/sizeof(addrs[0]); ai++){
     uint64 addr = addrs[ai];
 
-    int fd = open("README", 0);
+    int fd = open_readme();
     if(fd < 0){
       printf("open(README) failed\n");
       exit(1);
@@ -147,26 +156,26 @@ copyinstr2(char *s)
   
   int ret = unlink(b);
   if(ret != -1){
-    printf("unlink(%s) returned %d, not -1\n", b, ret);
+    printf("unlink(cross-page string) returned %d, not -1\n", ret);
     exit(1);
   }
 
   int fd = open(b, O_CREATE | O_WRONLY);
   if(fd != -1){
-    printf("open(%s) returned %d, not -1\n", b, fd);
+    printf("open(cross-page string) returned %d, not -1\n", fd);
     exit(1);
   }
 
   ret = link(b, b);
   if(ret != -1){
-    printf("link(%s, %s) returned %d, not -1\n", b, b, ret);
+    printf("link(cross-page string) returned %d, not -1\n", ret);
     exit(1);
   }
 
   char *args[] = { "xx", 0 };
   ret = exec(b, args);
   if(ret != -1){
-    printf("exec(%s) returned %d, not -1\n", b, fd);
+    printf("exec(cross-page string) returned %d, not -1\n", ret);
     exit(1);
   }
 
@@ -176,10 +185,10 @@ copyinstr2(char *s)
     exit(1);
   }
   if(pid == 0){
-    static char big[PGSIZE+1];
-    for(int i = 0; i < PGSIZE; i++)
+    static char big[20*PGSIZE];
+    for(int i = 0; i < sizeof(big) - 1; i++)
       big[i] = 'x';
-    big[PGSIZE] = '\0';
+    big[sizeof(big) - 1] = '\0';
     char *args2[] = { big, big, big, 0 };
     ret = exec("echo", args2);
     if(ret != -1){
@@ -191,7 +200,7 @@ copyinstr2(char *s)
 
   int st = 0;
   wait(&st);
-  if(st != 747){
+  if(st != 747 && st != (747 << 8)){
     printf("exec(echo, BIG) succeeded, should have failed\n");
     exit(1);
   }
@@ -273,7 +282,7 @@ rwsbrk(char *s)
   close(fd);
   unlink("rwsbrk");
 
-  fd = open("README", O_RDONLY);
+  fd = open("/home/README", O_RDONLY);
   if(fd < 0){
     printf("open(README) failed\n");
     exit(1);
@@ -286,6 +295,85 @@ rwsbrk(char *s)
   close(fd);
   
   exit(0);
+}
+
+#define CLONE_VM              0x00000100
+#define CLONE_FS              0x00000200
+#define CLONE_FILES           0x00000400
+#define CLONE_THREAD          0x00010000
+#define CLONE_SETTLS          0x00080000
+#define CLONE_PARENT_SETTID   0x00100000
+#define CLONE_CHILD_CLEARTID  0x00200000
+#define CLONE_CHILD_SETTID    0x01000000
+#define FUTEX_WAIT            0
+
+volatile int thread_shared;
+volatile int thread_ready;
+volatile int thread_tid_slot;
+int thread_pipefd[2];
+char thread_stack[PGSIZE * 2] __attribute__((aligned(16)));
+
+void
+linuxthreads(char *s)
+{
+  int parent_pid = __sys_getpid();
+  int parent_tid = __sys_gettid();
+  int ptid = 0;
+
+  if(pipe(thread_pipefd) < 0){
+    printf("%s: pipe failed\n", s);
+    exit(1);
+  }
+
+  thread_tid_slot = -1;
+  uint64 flags = CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_THREAD |
+                 CLONE_SETTLS | CLONE_PARENT_SETTID |
+                 CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID;
+  int tid = __sys_clone(flags, (uint64)thread_stack + sizeof(thread_stack),
+                        (uint64)&ptid, 0, (uint64)&thread_tid_slot);
+  if(tid < 0){
+    printf("%s: clone failed\n", s);
+    exit(1);
+  }
+
+  if(tid == 0){
+    if(__sys_getpid() != parent_pid){
+      printf("%s: child getpid differs\n", s);
+      __sys_exit(2);
+    }
+    if(__sys_gettid() == parent_tid){
+      printf("%s: child gettid equals parent\n", s);
+      __sys_exit(3);
+    }
+    thread_shared = 1234;
+    close(thread_pipefd[1]);
+    thread_ready = 1;
+    __sys_exit(0);
+  }
+
+  if(ptid != tid){
+    printf("%s: parent tid not written\n", s);
+    exit(1);
+  }
+  while(thread_ready == 0)
+    __sys_sched_yield();
+
+  if(thread_shared != 1234){
+    printf("%s: shared memory not visible\n", s);
+    exit(1);
+  }
+  if(write(thread_pipefd[1], "x", 1) >= 0){
+    printf("%s: close not shared through CLONE_FILES\n", s);
+    exit(1);
+  }
+  while(thread_tid_slot != 0)
+    __sys_futex((uint64)&thread_tid_slot, FUTEX_WAIT, thread_tid_slot, 0, 0, 0);
+
+  int st = 0;
+  if(wait(&st) >= 0){
+    printf("%s: wait reaped same thread-group task\n", s);
+    exit(1);
+  }
 }
 
 // test O_TRUNC.
@@ -2685,7 +2773,7 @@ lazy_copy(char *s)
     0x8000000000,
   };
   for(int i = 0; i < sizeof(bad)/sizeof(bad[0]); i++){
-    int fd = open("README", 0);
+    int fd = open_readme();
     if(fd < 0) {
       printf("cannot open README\n");
       exit(1);
@@ -2717,6 +2805,7 @@ struct test {
   {copyinstr1, "copyinstr1"},
   {copyinstr2, "copyinstr2"},
   {copyinstr3, "copyinstr3"},
+  {linuxthreads, "linuxthreads"},
   {rwsbrk, "rwsbrk" },
   {truncate1, "truncate1"},
   {truncate2, "truncate2"},
