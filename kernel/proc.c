@@ -83,11 +83,13 @@ proc_mapstacks(pagetable_t kpgtbl)
   struct proc *p;
   
   for(p = proc; p < &proc[NPROC]; p++) {
-    char *pa = kalloc();
-    if(pa == 0)
-      panic("kalloc");
     uint64 va = KSTACK((int) (p - proc));
-    kvmmap(kpgtbl, va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+    for(int i = 0; i < KSTACK_PAGES; i++){
+      char *pa = kalloc();
+      if(pa == 0)
+        panic("kalloc");
+      kvmmap(kpgtbl, va + i*PGSIZE, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+    }
   }
 }
 
@@ -173,8 +175,6 @@ found:
   p->state = USED;
   p->interpose_mask = 0;
   p->interpose_path[0] = 0;
-  p->cwd_is_ext4 = 0;
-  safestrcpy(p->ext4_cwd, "/", sizeof(p->ext4_cwd));
   p->vfs_root.mount = vfs_root_mount();
   safestrcpy(p->vfs_root.inner, "/", sizeof(p->vfs_root.inner));
   safestrcpy(p->vfs_root.abs_path, "/", sizeof(p->vfs_root.abs_path));
@@ -240,7 +240,7 @@ found:
   // which returns to user space.
   memset(&p->context, 0, sizeof(p->context));
   p->context.ra = (uint64)forkret;
-  p->context.sp = p->kstack + PGSIZE;
+  p->context.sp = p->kstack + KSTACK_PAGES*PGSIZE;
 
   return p;
 }
@@ -284,8 +284,6 @@ freeproc(struct proc *p)
 
   p->interpose_mask = 0;
   p->interpose_path[0] = 0;
-  p->cwd_is_ext4 = 0;
-  p->ext4_cwd[0] = 0;
   p->vfs_root.mount = 0;
   p->vfs_root.inner[0] = 0;
   p->vfs_root.abs_path[0] = 0;
@@ -522,8 +520,6 @@ vmawriteback(struct proc *p, struct vma *v, uint64 addr, uint64 len)
     return 0;
   if(v->f == 0)
     return 0;
-  if(v->f->type == FD_EXT4)
-    return -1;
 
   int max = ((MAXOPBLOCKS-1-1-2) / 2) * BSIZE;
   for(uint64 a = addr; a < addr + len; a += PGSIZE){
@@ -547,11 +543,7 @@ vmawriteback(struct proc *p, struct vma *v, uint64 addr, uint64 len)
       if(n1 > max)
         n1 = max;
 
-      begin_op();
-      ilock(v->f->ip);
-      int r = writei(v->f->ip, 0, (uint64)(src + done), foff + done, n1);
-      iunlock(v->f->ip);
-      end_op();
+      int r = vfs_file_write_kernel(v->f, src + done, n1, foff + done);
       if(r != n1)
         return -1;
       done += n1;
@@ -768,8 +760,6 @@ forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, int share_vm, int share
     if(p->ofile[i])
       np->ofile[i] = filedup(p->ofile[i]);
   np->cwd = idup(p->cwd);
-  np->cwd_is_ext4 = p->cwd_is_ext4;
-  safestrcpy(np->ext4_cwd, p->ext4_cwd, sizeof(np->ext4_cwd));
   np->vfs_root.mount = p->vfs_root.mount;
   safestrcpy(np->vfs_root.inner, p->vfs_root.inner, sizeof(np->vfs_root.inner));
   safestrcpy(np->vfs_root.abs_path, p->vfs_root.abs_path, sizeof(np->vfs_root.abs_path));

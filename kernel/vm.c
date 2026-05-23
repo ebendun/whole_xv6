@@ -964,15 +964,7 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
 
     if(v->f){
       uint64 off = v->offset + (a - v->addr);
-      int n;
-      if(v->f->type == FD_EXT4){
-        n = ext4_read_file_by_path_at(FIRSTDEV, v->f->ext4_path,
-                                      (uchar *)mem, PGSIZE, off);
-      } else {
-        ilock(v->f->ip);
-        n = readi(v->f->ip, 0, mem, off, PGSIZE);
-        iunlock(v->f->ip);
-      }
+      int n = vfs_file_read_kernel(v->f, (char *)mem, PGSIZE, off);
       if(n < 0){
         kfree((void*)mem);
         return 0;

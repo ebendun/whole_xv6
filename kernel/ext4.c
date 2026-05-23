@@ -761,32 +761,3 @@ ext4_join_path(char *out, int outsz, char *cwd, char *path)
   }
   out[oi] = 0;
 }
-
-int
-resolve_ext4_path(char *path, char *out, int outsz)
-{
-  struct proc *p = myproc();
-
-  if(path[0] == '/'){
-    if(strncmp(path, "/lib/", 5) == 0){
-      char aliased[MAXPATH];
-      snprintf(aliased, sizeof(aliased), "/glibc%s", path);
-      if(ext4_path_is_reg(FIRSTDEV, aliased) || ext4_path_is_dir(FIRSTDEV, aliased)){
-        safestrcpy(out, aliased, outsz);
-        return 1;
-      }
-      snprintf(aliased, sizeof(aliased), "/musl%s", path);
-      if(ext4_path_is_reg(FIRSTDEV, aliased) || ext4_path_is_dir(FIRSTDEV, aliased)){
-        safestrcpy(out, aliased, outsz);
-        return 1;
-      }
-    }
-    ext4_join_path(out, outsz, "/", path);
-    return 1;
-  }
-  if(p->cwd_is_ext4){
-    ext4_join_path(out, outsz, p->ext4_cwd, path);
-    return 1;
-  }
-  return 0;
-}

@@ -145,6 +145,8 @@ int             vfs_resolve(char*, struct vfs_path*);
 int             vfs_resolve_proc_path(struct proc*, char*, struct vfs_path*);
 int             vfs_redirect_proc_path(struct proc*, char*, char*, int);
 int             vfs_file_stat_node(struct file*, struct vfs_node*);
+int             vfs_file_read_kernel(struct file*, char*, int, uint64);
+int             vfs_file_write_kernel(struct file*, char*, int, uint64);
 
 // swtch.S
 void            swtch(struct context*, struct context*);
@@ -255,7 +257,6 @@ int             ext4_dirent_by_path(int dev, const char *path, uint64 off, uint6
                                     uint64 *ino, uchar *type, char *name, int namesz);
 void            ext4_print_sh_scripts(int dev);
 void            ext4_join_path(char *out, int outsz, char *cwd, char *path);
-int             resolve_ext4_path(char *path, char *out, int outsz);
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
 

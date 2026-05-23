@@ -119,6 +119,72 @@ vfs_copy_dirent64(uint64 dst, uint64 ino, uint64 off, uchar type, char *name)
   return reclen;
 }
 
+static char*
+vfs_root_mount_child(struct vfs_mount *mnt)
+{
+  char *name;
+
+  if(mnt == 0 || mnt->used != VFS_MOUNT_READY)
+    return 0;
+  if(mnt->target[0] != '/' || mnt->target[1] == 0)
+    return 0;
+
+  name = mnt->target + 1;
+  for(char *p = name; *p; p++){
+    if(*p == '/')
+      return 0;
+  }
+  return name;
+}
+
+static int
+vfs_linux_passthrough_abs(char *path)
+{
+  if(path == 0 || path[0] != '/')
+    return 0;
+  if((strncmp(path, "/dev", 4) == 0 && (path[4] == 0 || path[4] == '/')) ||
+     (strncmp(path, "/proc", 5) == 0 && (path[5] == 0 || path[5] == '/')) ||
+     (strncmp(path, "/tmp", 4) == 0 && (path[4] == 0 || path[4] == '/')) ||
+     (strncmp(path, "/bin", 4) == 0 && (path[4] == 0 || path[4] == '/')))
+    return 1;
+  return 0;
+}
+
+static int
+vfs_copy_root_mounts(uint64 dirp, int nread, int n, uint64 dirsize, uint64 *offp)
+{
+  int seen = 0;
+  int start;
+
+  if(offp == 0 || *offp < dirsize)
+    return n;
+
+  start = (*offp - dirsize) / sizeof(struct dirent);
+  for(int i = 0; i < VFS_MAX_MOUNTS; i++){
+    char *name = vfs_root_mount_child(&mounts[i]);
+    int r;
+    uint64 nextoff;
+
+    if(name == 0)
+      continue;
+    if(seen++ < start)
+      continue;
+
+    r = vfs_dirent64_reclen(name);
+    if(r < 0 || n + r > nread)
+      break;
+
+    nextoff = dirsize + seen * sizeof(struct dirent);
+    r = vfs_copy_dirent64(dirp + n, ROOTINO + 10000 + seen, nextoff, 4, name);
+    if(r < 0)
+      break;
+    n += r;
+    *offp = nextoff;
+  }
+
+  return n;
+}
+
 static uchar
 vfs_linux_dtype_from_ext4(uchar type)
 {
@@ -549,6 +615,8 @@ xv6_vfs_readdir(struct file *f, uint64 dirp, int nread)
   struct dirent de;
   int n = 0;
   int r;
+  int isroot;
+  uint dirsize;
 
   if(f == 0 || f->type != FD_INODE || nread < 48)
     return -1;
@@ -558,6 +626,8 @@ xv6_vfs_readdir(struct file *f, uint64 dirp, int nread)
     iunlock(f->ip);
     return -1;
   }
+  isroot = f->ip->inum == ROOTINO;
+  dirsize = f->ip->size;
   while(f->off + sizeof(de) <= f->ip->size){
     if(readi(f->ip, 0, (uint64)&de, f->off, sizeof(de)) != sizeof(de))
       break;
@@ -574,6 +644,8 @@ xv6_vfs_readdir(struct file *f, uint64 dirp, int nread)
     n += r;
   }
   iunlock(f->ip);
+  if(isroot && n < nread)
+    n = vfs_copy_root_mounts(dirp, nread, n, dirsize, &f->off);
   return n;
 }
 
@@ -876,6 +948,50 @@ vfs_file_stat_node(struct file *f, struct vfs_node *node)
   return -1;
 }
 
+int
+vfs_file_read_kernel(struct file *f, char *buf, int n, uint64 off)
+{
+  int r;
+
+  if(f == 0 || buf == 0 || n < 0)
+    return -1;
+
+  if(f->type == FD_INODE){
+    ilock(f->ip);
+    r = readi(f->ip, 0, (uint64)buf, off, n);
+    iunlock(f->ip);
+    return r;
+  }
+
+  if(f->type == FD_EXT4)
+    return ext4_read_file_by_path_at(FIRSTDEV, f->ext4_path, (uchar *)buf, n, off);
+
+  return -1;
+}
+
+int
+vfs_file_write_kernel(struct file *f, char *buf, int n, uint64 off)
+{
+  int r;
+
+  if(f == 0 || buf == 0 || n < 0)
+    return -1;
+
+  if(f->type == FD_INODE){
+    begin_op();
+    ilock(f->ip);
+    r = writei(f->ip, 0, (uint64)buf, off, n);
+    iunlock(f->ip);
+    end_op();
+    return r;
+  }
+
+  if(f->type == FD_EXT4)
+    return -1;
+
+  return -1;
+}
+
 static int
 vfs_streq(const char *a, const char *b)
 {
@@ -884,16 +1000,65 @@ vfs_streq(const char *a, const char *b)
 }
 
 static void
+vfs_clean_path(char *dst, int dstsz, const char *src)
+{
+  int di = 0;
+  int absolute;
+
+  if(dstsz <= 0)
+    return;
+  if(src == 0 || src[0] == 0){
+    safestrcpy(dst, "/", dstsz);
+    return;
+  }
+
+  absolute = src[0] == '/';
+  if(absolute)
+    dst[di++] = '/';
+
+  for(int si = 0; src[si] && di < dstsz - 1; ){
+    int start, len;
+
+    while(src[si] == '/')
+      si++;
+    start = si;
+    while(src[si] && src[si] != '/')
+      si++;
+    len = si - start;
+    if(len == 0)
+      break;
+
+    if(len == 1 && src[start] == '.')
+      continue;
+    if(len == 2 && src[start] == '.' && src[start + 1] == '.'){
+      int root = absolute ? 1 : 0;
+
+      if(di > root){
+        if(di > root && dst[di - 1] == '/')
+          di--;
+        while(di > root && dst[di - 1] != '/')
+          di--;
+      }
+      continue;
+    }
+
+    if(di > 0 && dst[di - 1] != '/' && di < dstsz - 1)
+      dst[di++] = '/';
+    for(int i = 0; i < len && di < dstsz - 1; i++)
+      dst[di++] = src[start + i];
+  }
+
+  if(di == 0)
+    dst[di++] = '/';
+  while(di > 1 && dst[di - 1] == '/')
+    di--;
+  dst[di] = 0;
+}
+
+static void
 vfs_normalize_target(char *dst, int dstsz, const char *src)
 {
-  int n;
-
-  safestrcpy(dst, src, dstsz);
-  n = strlen(dst);
-  while(n > 1 && dst[n - 1] == '/'){
-    dst[n - 1] = 0;
-    n--;
-  }
+  vfs_clean_path(dst, dstsz, src);
 }
 
 static int
@@ -1166,10 +1331,13 @@ vfs_resolve(char *path, struct vfs_path *out)
   int best = -1;
   int bestlen = -1;
   int target_len;
+  char clean[MAXPATH];
   char *inner;
 
   if(path == 0 || out == 0 || path[0] != '/')
     return -1;
+  vfs_clean_path(clean, sizeof(clean), path);
+  path = clean;
 
   acquire(&vfs_lock);
   for(int i = 0; i < VFS_MAX_MOUNTS; i++){
@@ -1225,7 +1393,9 @@ vfs_resolve_proc_path(struct proc *p, char *path, struct vfs_path *out)
       return -1;
     if(p->vfs_root.abs_path[0] == '/' && p->vfs_root.abs_path[1] == 0)
       return vfs_resolve(path, out);
-    vfs_join_path(abs, sizeof(abs), p->vfs_root.abs_path, path);
+    if(vfs_linux_passthrough_abs(path))
+      return vfs_resolve(path, out);
+    snprintf(abs, sizeof(abs), "%s%s", p->vfs_root.abs_path, path);
     return vfs_resolve(abs, out);
   }
 

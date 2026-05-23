@@ -83,6 +83,7 @@ usertrap(void)
   if(p->linux_pending_signal)
     linux_deliver_signal();
 
+  //for alarm lab
   if(which_dev == 2){
     if(p->alarm_interval > 0 && p->alarm_inflight == 0){
       p->alarm_ticks++;
@@ -128,7 +129,7 @@ prepare_return(void)
   // set up trapframe values that uservec will need when
   // the process next traps into the kernel.
   p->trapframe->kernel_satp = r_satp();         // kernel page table
-  p->trapframe->kernel_sp = p->kstack + PGSIZE; // process's kernel stack
+  p->trapframe->kernel_sp = p->kstack + KSTACK_PAGES*PGSIZE; // process's kernel stack
   p->trapframe->kernel_trap = (uint64)usertrap;
   p->trapframe->kernel_hartid = r_tp();         // hartid for cpuid()
 

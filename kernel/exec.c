@@ -3,8 +3,11 @@
 #include "memlayout.h"
 #include "riscv.h"
 #include "spinlock.h"
+#include "sleeplock.h"
 #include "proc.h"
+#include "stat.h"
 #include "fs.h"
+#include "file.h"
 #include "defs.h"
 #include "elf.h"
 #include "vfs.h"
@@ -23,8 +26,58 @@
 #define AT_EGID   14
 #define AT_RANDOM 25
 
-static int loadseg(pde_t *, uint64, struct inode *, uint, uint);
-static int loadseg_ext4(pde_t *, uint64, char *, uint, uint);
+static int loadseg_file(pde_t *, uint64, struct file *, uint, uint);
+
+static int
+exec_open_vfs(char *path, struct vfs_path *vp, struct file **fp)
+{
+  struct proc *p = myproc();
+  struct vfs_node node;
+
+  if(vfs_resolve_proc_path(p, path, vp) < 0)
+    return -1;
+  if(vp->ops == 0 || vp->ops->inode == 0 || vp->ops->inode->lookup == 0 ||
+     vp->ops->file == 0 || vp->ops->file->open == 0)
+    return -1;
+  if(vp->ops->inode->lookup(vp->mount, vp->inner, &node) < 0 ||
+     node.type != T_FILE)
+    return -1;
+  return vp->ops->file->open(vp->mount, vp->inner, 0, fp);
+}
+
+static int
+exec_open_interp(char *path, int from_ext4, struct vfs_path *vp, struct file **fp)
+{
+  char full[MAXPATH];
+  struct proc *p = myproc();
+  int rooted_ext4 = p->vfs_root.mount && p->vfs_root.mount->type == VFS_EXT4;
+
+  if(from_ext4 && path[0] == '/'){
+    if(strncmp(path, "/lib/", 5) == 0){
+      snprintf(full, sizeof(full), rooted_ext4 ? "/glibc%s" : "/ext4/glibc%s", path);
+      if(exec_open_vfs(full, vp, fp) == 0)
+        return 0;
+      snprintf(full, sizeof(full), rooted_ext4 ? "/musl%s" : "/ext4/musl%s", path);
+      if(exec_open_vfs(full, vp, fp) == 0)
+        return 0;
+    }
+    snprintf(full, sizeof(full), rooted_ext4 ? "%s" : "/ext4%s", path);
+    return exec_open_vfs(full, vp, fp);
+  }
+  return exec_open_vfs(path, vp, fp);
+}
+
+static int
+exec_vfs_file_exists(char *path)
+{
+  struct vfs_path vp;
+  struct file *f;
+
+  if(exec_open_vfs(path, &vp, &f) < 0)
+    return 0;
+  fileclose(f);
+  return 1;
+}
 
 static int
 exec_script(char *script, char *hdr, char **argv)
@@ -74,19 +127,25 @@ exec_script(char *script, char *hdr, char **argv)
      (strncmp(se->interp, "/bin/busybox", 12) == 0 && se->interp[12] == 0) ||
      (strncmp(se->interp, "/busybox", 8) == 0 && se->interp[8] == 0)){
     struct proc *p = myproc();
-    if(p->cwd_is_ext4){
+    if(p->vfs_cwd.mount && p->vfs_cwd.mount->type == VFS_EXT4){
       char *slash;
-      safestrcpy(se->resolved, p->ext4_cwd, sizeof(se->resolved));
+      safestrcpy(se->resolved, p->vfs_cwd.inner, sizeof(se->resolved));
       for(;;){
-        snprintf(se->interp, sizeof(se->interp), "%s/busybox", se->resolved);
-        if(ext4_path_is_reg(FIRSTDEV, se->interp))
+        if(p->vfs_root.mount && p->vfs_root.mount->type == VFS_EXT4)
+          snprintf(se->interp, sizeof(se->interp), "%s/busybox", se->resolved);
+        else
+          snprintf(se->interp, sizeof(se->interp), "/ext4%s/busybox", se->resolved);
+        if(exec_vfs_file_exists(se->interp))
           break;
         slash = 0;
         for(char *q = se->resolved; *q; q++)
           if(*q == '/')
             slash = q;
         if(slash == 0 || slash == se->resolved){
-          safestrcpy(se->interp, "/musl/busybox", sizeof(se->interp));
+          if(p->vfs_root.mount && p->vfs_root.mount->type == VFS_EXT4)
+            safestrcpy(se->interp, "/musl/busybox", sizeof(se->interp));
+          else
+            safestrcpy(se->interp, "/ext4/musl/busybox", sizeof(se->interp));
           break;
         }
         *slash = 0;
@@ -134,6 +193,8 @@ kexec(char *path, char **argv)
     struct elfhdr elf;
     struct elfhdr ielf;
     struct proghdr ph;
+    struct vfs_path vp;
+    uint64 auxv[26];
   } *st;
   char *s, *last;
   int i, off;
@@ -142,8 +203,8 @@ kexec(char *path, char **argv)
   uint64 argc, sz = 0, sp, stackbase, phdr_addr = 0;
   uint64 app_brk, at_base = 0, entry;
   int stack_pages;
-  struct inode *ip;
-  struct vfs_path vp;
+  struct file *ef = 0;
+  struct file *interp_f = 0;
   pagetable_t pagetable = 0, oldpagetable;
   struct proc *p = myproc();
   int ret;
@@ -153,73 +214,26 @@ kexec(char *path, char **argv)
     return -1;
   memset(st, 0, sizeof(*st));
 
-  // Open the executable file.
-  ip = 0;
-  if(vfs_resolve_proc_path(p, path, &vp) == 0 &&
-     vp.type == VFS_EXT4 &&
-     ext4_path_is_reg(FIRSTDEV, vp.inner))
-  {
-      safestrcpy(st->epath, vp.inner, sizeof(st->epath));
-      is_ext4 = 1;
+  if(exec_open_vfs(path, &st->vp, &ef) < 0){
+    kfree(st);
+    return -1;
   }
-  else if(vfs_resolve_proc_path(p, path, &vp) == 0 &&
-            vp.type == VFS_XV6)
-  {
-    begin_op();
-    if((ip = namei(vp.inner)) == 0){
-      end_op();
-      if(resolve_ext4_path(path, st->epath, sizeof(st->epath)) &&
-         ext4_path_is_reg(FIRSTDEV, st->epath)){
-        is_ext4 = 1;
-      } else {
-        kfree(st);
-        return -1;
-      }
-    } else {
-      ilock(ip);
-    }
-  } else if(path[0] != '/' && p->cwd_is_ext4 &&
-     resolve_ext4_path(path, st->epath, sizeof(st->epath)) &&
-     ext4_path_is_reg(FIRSTDEV, st->epath)){
-    is_ext4 = 1;
-  } else {
-    begin_op();
-    if((ip = namei(path)) == 0){
-      end_op();
-      if(resolve_ext4_path(path, st->epath, sizeof(st->epath)) &&
-         ext4_path_is_reg(FIRSTDEV, st->epath)){
-        is_ext4 = 1;
-      } else {
-        kfree(st);
-        return -1;
-      }
-    } else {
-      ilock(ip);
-    }
-  }
+  safestrcpy(st->epath, st->vp.type == VFS_EXT4 ? st->vp.inner : st->vp.abs_path,
+             sizeof(st->epath));
+  is_ext4 = st->vp.type == VFS_EXT4;
 
   // Read the ELF header.
-  if(is_ext4){
-    if(ext4_read_file_by_path_at(FIRSTDEV, st->epath, (uchar *)&st->elf, sizeof(st->elf), 0) != sizeof(st->elf))
-      goto bad;
-  } else if(readi(ip, 0, (uint64)&st->elf, 0, sizeof(st->elf)) != sizeof(st->elf)){
+  if(vfs_file_read_kernel(ef, (char *)&st->elf, sizeof(st->elf), 0) != sizeof(st->elf))
     goto bad;
-  }
 
   // Is this really an ELF file?
   if(st->elf.magic != ELF_MAGIC){
     char hdr[128];
     memset(hdr, 0, sizeof(hdr));
-    if(is_ext4){
-      ext4_read_file_by_path_at(FIRSTDEV, st->epath, (uchar *)hdr, sizeof(hdr) - 1, 0);
-      ret = exec_script(st->epath, hdr, argv);
-    } else {
-      readi(ip, 0, (uint64)hdr, 0, sizeof(hdr) - 1);
-      iunlockput(ip);
-      end_op();
-      ip = 0;
-      ret = exec_script(path, hdr, argv);
-    }
+    vfs_file_read_kernel(ef, hdr, sizeof(hdr) - 1, 0);
+    fileclose(ef);
+    ef = 0;
+    ret = exec_script(path, hdr, argv);
     kfree(st);
     return ret;
   }
@@ -229,16 +243,12 @@ kexec(char *path, char **argv)
 
   // Load program into memory.
   for(i=0, off=st->elf.phoff; i<st->elf.phnum; i++, off+=sizeof(st->ph)){
-    if(is_ext4){
-      if(ext4_read_file_by_path_at(FIRSTDEV, st->epath, (uchar *)&st->ph, sizeof(st->ph), off) != sizeof(st->ph))
-        goto bad;
-    } else if(readi(ip, 0, (uint64)&st->ph, off, sizeof(st->ph)) != sizeof(st->ph)){
+    if(vfs_file_read_kernel(ef, (char *)&st->ph, sizeof(st->ph), off) != sizeof(st->ph))
       goto bad;
-    }
     if(st->ph.type == ELF_PROG_INTERP && is_ext4){
       if(st->ph.filesz == 0 || st->ph.filesz >= sizeof(st->interp))
         goto bad;
-      if(ext4_read_file_by_path_at(FIRSTDEV, st->epath, (uchar *)st->interp, st->ph.filesz, st->ph.off) != st->ph.filesz)
+      if(vfs_file_read_kernel(ef, st->interp, st->ph.filesz, st->ph.off) != st->ph.filesz)
         goto bad;
       st->interp[st->ph.filesz - 1] = 0;
       has_interp = 1;
@@ -255,18 +265,11 @@ kexec(char *path, char **argv)
     if((sz1 = uvmalloc(pagetable, sz, st->ph.vaddr + st->ph.memsz, flags2perm(st->ph.flags))) == 0)
       goto bad;
     sz = sz1;
-    if(is_ext4){
-      if(loadseg_ext4(pagetable, st->ph.vaddr, st->epath, st->ph.off, st->ph.filesz) < 0)
-        goto bad;
-    } else if(loadseg(pagetable, st->ph.vaddr, ip, st->ph.off, st->ph.filesz) < 0){
+    if(loadseg_file(pagetable, st->ph.vaddr, ef, st->ph.off, st->ph.filesz) < 0)
       goto bad;
-    }
   }
-  if(is_ext4 == 0){
-    iunlockput(ip);
-    end_op();
-    ip = 0;
-  }
+  fileclose(ef);
+  ef = 0;
 
   entry = st->elf.entry;
   app_brk = PGROUNDUP(sz);
@@ -274,10 +277,11 @@ kexec(char *path, char **argv)
   if(has_interp){
     uint64 base, sz1;
 
-    if(resolve_ext4_path(st->interp, st->interp_epath, sizeof(st->interp_epath)) == 0 ||
-       ext4_path_is_reg(FIRSTDEV, st->interp_epath) == 0)
+    if(exec_open_interp(st->interp, is_ext4, &st->vp, &interp_f) < 0)
       goto bad;
-    if(ext4_read_file_by_path_at(FIRSTDEV, st->interp_epath, (uchar *)&st->ielf, sizeof(st->ielf), 0) != sizeof(st->ielf))
+    safestrcpy(st->interp_epath, st->vp.type == VFS_EXT4 ? st->vp.inner : st->vp.abs_path,
+               sizeof(st->interp_epath));
+    if(vfs_file_read_kernel(interp_f, (char *)&st->ielf, sizeof(st->ielf), 0) != sizeof(st->ielf))
       goto bad;
     if(st->ielf.magic != ELF_MAGIC)
       goto bad;
@@ -285,7 +289,7 @@ kexec(char *path, char **argv)
     base = PGROUNDUP(sz) + 16 * PGSIZE;
     at_base = base;
     for(i = 0, off = st->ielf.phoff; i < st->ielf.phnum; i++, off += sizeof(st->ph)){
-      if(ext4_read_file_by_path_at(FIRSTDEV, st->interp_epath, (uchar *)&st->ph, sizeof(st->ph), off) != sizeof(st->ph))
+      if(vfs_file_read_kernel(interp_f, (char *)&st->ph, sizeof(st->ph), off) != sizeof(st->ph))
         goto bad;
       if(st->ph.type != ELF_PROG_LOAD)
         continue;
@@ -296,9 +300,11 @@ kexec(char *path, char **argv)
       if((sz1 = uvmalloc(pagetable, sz, base + st->ph.vaddr + st->ph.memsz, flags2perm(st->ph.flags))) == 0)
         goto bad;
       sz = sz1;
-      if(loadseg_ext4(pagetable, base + st->ph.vaddr, st->interp_epath, st->ph.off, st->ph.filesz) < 0)
+      if(loadseg_file(pagetable, base + st->ph.vaddr, interp_f, st->ph.off, st->ph.filesz) < 0)
         goto bad;
     }
+    fileclose(interp_f);
+    interp_f = 0;
     entry = base + st->ielf.entry;
   }
 
@@ -342,28 +348,27 @@ kexec(char *path, char **argv)
   {
     uint64 rand_addr, argv_addr, envp_addr, auxv_addr;
     uint64 random[2] = {0, 0};
-    uint64 auxv[] = {
-      AT_PHDR, phdr_addr,
-      AT_PHENT, sizeof(struct proghdr),
-      AT_PHNUM, st->elf.phnum,
-      AT_PAGESZ, PGSIZE,
-      AT_BASE, at_base,
-      AT_FLAGS, 0,
-      AT_ENTRY, st->elf.entry,
-      AT_UID, 0,
-      AT_EUID, 0,
-      AT_GID, 0,
-      AT_EGID, 0,
-      AT_RANDOM, 0,
-      AT_NULL, 0,
-    };
-    int auxbytes = sizeof(auxv);
+    int auxbytes = sizeof(st->auxv);
     int total;
+
+    st->auxv[0] = AT_PHDR;   st->auxv[1] = phdr_addr;
+    st->auxv[2] = AT_PHENT;  st->auxv[3] = sizeof(struct proghdr);
+    st->auxv[4] = AT_PHNUM;  st->auxv[5] = st->elf.phnum;
+    st->auxv[6] = AT_PAGESZ; st->auxv[7] = PGSIZE;
+    st->auxv[8] = AT_BASE;   st->auxv[9] = at_base;
+    st->auxv[10] = AT_FLAGS; st->auxv[11] = 0;
+    st->auxv[12] = AT_ENTRY; st->auxv[13] = st->elf.entry;
+    st->auxv[14] = AT_UID;   st->auxv[15] = 0;
+    st->auxv[16] = AT_EUID;  st->auxv[17] = 0;
+    st->auxv[18] = AT_GID;   st->auxv[19] = 0;
+    st->auxv[20] = AT_EGID;  st->auxv[21] = 0;
+    st->auxv[22] = AT_RANDOM;
+    st->auxv[24] = AT_NULL;  st->auxv[25] = 0;
 
     sp -= sizeof(random);
     sp -= sp % 16;
     rand_addr = sp;
-    auxv[23] = rand_addr;
+    st->auxv[23] = rand_addr;
     if(sp < stackbase || copyout(pagetable, rand_addr, (char *)random, sizeof(random)) < 0)
       goto bad;
 
@@ -385,7 +390,7 @@ kexec(char *path, char **argv)
     uint64 zero = 0;
     if(copyout(pagetable, envp_addr, (char *)&zero, sizeof(zero)) < 0)
       goto bad;
-    if(copyout(pagetable, auxv_addr, (char *)auxv, auxbytes) < 0)
+    if(copyout(pagetable, auxv_addr, (char *)st->auxv, auxbytes) < 0)
       goto bad;
 
     // xv6 user programs enter main directly; Linux ABI programs read from sp.
@@ -430,10 +435,10 @@ kexec(char *path, char **argv)
  bad:
   if(pagetable)
     proc_freepagetable(pagetable, sz);
-  if(ip && is_ext4 == 0){
-    iunlockput(ip);
-    end_op();
-  }
+  if(ef)
+    fileclose(ef);
+  if(interp_f)
+    fileclose(interp_f);
   kfree(st);
   return -1;
 }
@@ -443,7 +448,7 @@ kexec(char *path, char **argv)
 // and the pages from va to va+sz must already be mapped.
 // Returns 0 on success, -1 on failure.
 static int
-loadseg(pagetable_t pagetable, uint64 va, struct inode *ip, uint offset, uint sz)
+loadseg_file(pagetable_t pagetable, uint64 va, struct file *f, uint offset, uint sz)
 {
   uint i, n;
   uint64 pa;
@@ -455,27 +460,7 @@ loadseg(pagetable_t pagetable, uint64 va, struct inode *ip, uint offset, uint sz
     n = PGSIZE - ((va + i) % PGSIZE);
     if(sz - i < n)
       n = sz - i;
-    if(readi(ip, 0, (uint64)pa, offset+i, n) != n)
-      return -1;
-  }
-  
-  return 0;
-}
-
-static int
-loadseg_ext4(pagetable_t pagetable, uint64 va, char *path, uint offset, uint sz)
-{
-  uint i, n;
-  uint64 pa;
-
-  for(i = 0; i < sz; i += n){
-    pa = walkaddr(pagetable, va + i);
-    if(pa == 0)
-      panic("loadseg_ext4: address should exist");
-    n = PGSIZE - ((va + i) % PGSIZE);
-    if(sz - i < n)
-      n = sz - i;
-    if(ext4_read_file_by_path_at(FIRSTDEV, path, (uchar *)pa, n, offset+i) != n)
+    if(vfs_file_read_kernel(f, (char *)pa, n, offset+i) != n)
       return -1;
   }
 

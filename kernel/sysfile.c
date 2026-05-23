@@ -671,6 +671,7 @@ sys_mmap(void)
   uint64 len;
   int prot, flags, offset;
   struct file *f;
+  struct vfs_node node;
   struct proc *p = myproc();
 
   argaddr(0, &addr);
@@ -684,7 +685,7 @@ sys_mmap(void)
   if(argfd(4, 0, &f) < 0)
     return -1;
   if((flags != MAP_SHARED && flags != MAP_PRIVATE) ||
-     (f->type != FD_INODE && f->type != FD_EXT4))
+     vfs_file_stat_node(f, &node) < 0 || node.type != T_FILE)
     return -1;
   if((prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) == 0)
     return -1;
@@ -707,20 +708,12 @@ sys_mmap(void)
   uint64 mapaddr = PGROUNDDOWN(p->mmap_base - maplen);
   if(mapaddr < p->sz || mapaddr + maplen > USYSCALL)
     return -1;
-  uint64 filelen;
-  if(f->type == FD_EXT4){
-    filelen = ext4_file_size_by_path(FIRSTDEV, f->ext4_path);
-  } else {
-    ilock(f->ip);
-    filelen = f->ip->size;
-    iunlock(f->ip);
-  }
 
   p->mmap_base = mapaddr;
   p->vmas[slot].used = 1;
   p->vmas[slot].addr = mapaddr;
   p->vmas[slot].len = maplen;
-  p->vmas[slot].filelen = filelen;
+  p->vmas[slot].filelen = node.size;
   p->vmas[slot].prot = prot;
   p->vmas[slot].flags = flags;
   p->vmas[slot].offset = 0;
@@ -1032,11 +1025,8 @@ vfs_sync_legacy_cwd(struct proc *p, struct vfs_path *vp)
   if(p == 0 || vp == 0)
     return -1;
 
-  if(vp->type == VFS_EXT4){
-    p->cwd_is_ext4 = 1;
-    safestrcpy(p->ext4_cwd, vp->inner, sizeof(p->ext4_cwd));
+  if(vp->type == VFS_EXT4)
     return 0;
-  }
 
   if(vp->type != VFS_XV6)
     return -1;
@@ -1058,8 +1048,6 @@ vfs_sync_legacy_cwd(struct proc *p, struct vfs_path *vp)
   end_op();
 
   p->cwd = ip;
-  p->cwd_is_ext4 = 0;
-  safestrcpy(p->ext4_cwd, "/", sizeof(p->ext4_cwd));
   return 0;
 }
 
@@ -1324,6 +1312,7 @@ sys_linux_sendfile(void)
   uint64 done = 0;
   struct proc *p = myproc();
   struct file *outf, *inf;
+  struct vfs_node node;
   char *buf;
 
   argint(0, &outfd);
@@ -1337,7 +1326,7 @@ sys_linux_sendfile(void)
     return -1;
   if(outf->type != FD_PIPE || outf->writable == 0)
     return -1;
-  if(inf->type != FD_EXT4 && inf->type != FD_INODE)
+  if(vfs_file_stat_node(inf, &node) < 0 || node.type != T_FILE)
     return -1;
   if(offaddr != 0){
     if(fetchaddr(offaddr, &off) < 0)
@@ -1356,13 +1345,7 @@ sys_linux_sendfile(void)
 
     if(n > PGSIZE)
       n = PGSIZE;
-    if(inf->type == FD_EXT4){
-      r = ext4_read_file_by_path_at(FIRSTDEV, inf->ext4_path, (uchar *)buf, n, off);
-    } else {
-      ilock(inf->ip);
-      r = readi(inf->ip, 0, (uint64)buf, off, n);
-      iunlock(inf->ip);
-    }
+    r = vfs_file_read_kernel(inf, buf, n, off);
     if(r <= 0)
       break;
 
@@ -1924,18 +1907,28 @@ uint64
 sys_chdir(void)
 {
   char path[MAXPATH];
+  char rpath[MAXPATH];
   struct vfs_path vp;
+  struct vfs_path rvp;
   struct vfs_node node;
   struct proc *p = myproc();
   
   if(argstr(0, path, MAXPATH) < 0)
     return -1;
 
-  if(vfs_resolve_proc_path(p, path, &vp) < 0 ||
-     vp.ops == 0 || vp.ops->inode == 0 || vp.ops->inode->lookup == 0 ||
-     vp.ops->inode->lookup(vp.mount, vp.inner, &node) < 0 ||
-     node.type != T_DIR)
+  if(vfs_resolve_proc_path(p, path, &vp) < 0)
     return -1;
+  if(vp.ops == 0 || vp.ops->inode == 0 || vp.ops->inode->lookup == 0)
+    return -1;
+  if(vp.ops->inode->lookup(vp.mount, vp.inner, &node) < 0 ||
+     node.type != T_DIR){
+    if(vfs_redirect_proc_path(p, path, rpath, sizeof(rpath)) < 0 ||
+       vfs_resolve(rpath, &rvp) < 0 ||
+       rvp.ops == 0 || rvp.ops->inode == 0 || rvp.ops->inode->lookup == 0 ||
+       rvp.ops->inode->lookup(rvp.mount, rvp.inner, &node) < 0 ||
+       node.type != T_DIR)
+      return -1;
+  }
 
   if(vfs_set_proc_cwd(p, vp.abs_path) < 0)
     return -1;
