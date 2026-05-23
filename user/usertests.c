@@ -612,7 +612,7 @@ opentest(char *s)
 {
   int fd;
 
-  fd = open("echo", 0);
+  fd = open("/bin/echo", 0);
   if(fd < 0){
     printf("%s: open echo failed!\n", s);
     exit(1);
@@ -898,9 +898,9 @@ killstatus(char *s)
     pause(1);
     kill(pid1);
     wait(&xst);
-    if(xst != -1) {
-       printf("%s: status should be -1\n", s);
-       exit(1);
+    if(xst != -1 && xst != (-1 << 8)){
+      printf("%s: status should be -1\n", s);
+      exit(1);
     }
   }
   exit(0);

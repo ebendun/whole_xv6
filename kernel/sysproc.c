@@ -4,10 +4,8 @@
 #include "defs.h"
 #include "memlayout.h"
 #include "spinlock.h"
+#include "rwlock.h"
 #include "proc.h"
-#ifdef PGTBL_SOL
-#include "riscv.h"
-#endif
 #include "vm.h"
 
 static struct spinlock futex_lock;

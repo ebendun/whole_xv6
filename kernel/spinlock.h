@@ -1,4 +1,7 @@
 // Mutual exclusion lock.
+#ifndef SPINLOCK_H
+#define SPINLOCK_H
+
 struct spinlock {
   uint locked;       // Is the lock held?
 
@@ -7,11 +10,4 @@ struct spinlock {
   struct cpu *cpu;   // The cpu holding the lock.
 };
 
-// Reader-writer lock.
-struct rwspinlock {
-  // Replace this with your implementation.
-  uint nreader;
-  uint writer_flag;
-  uint waiting_writers;
-  struct spinlock l;
-};
+#endif

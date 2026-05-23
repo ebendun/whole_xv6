@@ -26,6 +26,7 @@ OBJS = \
   $K/fs.o \
   $K/log.o \
   $K/sleeplock.o \
+  $K/rwlock.o \
   $K/file.o \
   $K/pipe.o \
   $K/exec.o \
@@ -51,13 +52,6 @@ ifdef KCSAN
 OBJS_KCSAN += \
 	$K/kcsan.o
 endif
-
-OBJS_KCSAN = \
-  $K/start.o \
-  $K/console.o \
-  $K/printf.o \
-  $K/uart.o \
-  $K/spinlock.o
 
 # riscv64-unknown-elf- or riscv64-linux-gnu-
 # perhaps in /opt/riscv/bin

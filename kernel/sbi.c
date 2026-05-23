@@ -1,4 +1,3 @@
-//cause using the opensbi we have to start the other hart by ourselves
 #include "types.h"
 #include "param.h"
 #include "riscv.h"
@@ -31,6 +30,8 @@ sbi_call(long ext, long fid, long arg0, long arg1, long arg2)
   return (struct sbiret){a0, a1};
 }
 
+//cause using the opensbi we have to start the other hart by ourselves
+// start the other harts, which will enter kernel in _entry.S, and become scheduler threads.
 void
 start_other_harts()
 {
