@@ -25,6 +25,7 @@ static struct udp_binding udp_bindings[MAX_UDP_PACKETS];
 static int
 find_binding(uint16 dport)
 {
+  // Find the UDP receive queue registered for this destination port.
   for(int i = 0; i < MAX_UDP_PACKETS; i++){
     if(udp_bindings[i].valid && udp_bindings[i].dport == dport)
       return i;
@@ -47,6 +48,7 @@ netinit(void)
 uint64
 sys_bind(void)
 {
+  // xv6 net lab bind: reserve a UDP destination port receive queue.
   int port;
   argint(0, &port);
 
@@ -77,6 +79,7 @@ sys_bind(void)
 uint64
 sys_unbind(void)
 {
+  // xv6 net lab unbind: drop the UDP receive queue for a port.
   int port;
   argint(0, &port);
 
@@ -111,6 +114,7 @@ sys_unbind(void)
 uint64
 sys_recv(void)
 {
+  // xv6 net lab recv: block for one UDP packet on a bound port.
   int dport;
   uint64 src;
   uint64 sport;
@@ -129,6 +133,7 @@ sys_recv(void)
     return -1;
   }
 
+  // Sleep until the interrupt receive path queues a packet for this port.
   while(udp_bindings[i].qcount == 0){
     sleep(&udp_bindings[i], &netlock);
   }
@@ -197,6 +202,7 @@ in_cksum(const unsigned char *addr, int len)
 uint64
 sys_send(void)
 {
+  // xv6 net lab send: build and transmit one UDP/IPv4/Ethernet packet.
   struct proc *p = myproc();
   int sport;
   int dst;
@@ -221,6 +227,7 @@ sys_send(void)
   }
   memset(buf, 0, PGSIZE);
 
+  // Construct Ethernet, IPv4, and UDP headers before copying user payload.
   struct eth *eth = (struct eth *) buf;
   memmove(eth->dhost, host_mac, ETHADDR_LEN);
   memmove(eth->shost, local_mac, ETHADDR_LEN);

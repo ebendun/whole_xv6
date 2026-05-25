@@ -22,6 +22,15 @@
 static int linux_copy_stat_time(uint64 staddr, uint64 dev, uint64 ino,
                                 uint64 mode, uint64 nlink, uint64 size,
                                 char *path, struct file *tf);
+static int linux_openat_resolve(struct proc *p, int dirfd, char *path,
+                                char *out, int outsz);
+static int linux_stat_proc_path(struct proc *p, char *path, struct vfs_path *vp,
+                                struct vfs_node *node, char *actual,
+                                int actualsz);
+static void linux_apply_times(uint64 *atime_sec, uint64 *atime_nsec,
+                              uint64 *mtime_sec, uint64 *mtime_nsec,
+                              int have_ts, uint64 *ts, uint64 now_sec,
+                              uint64 now_nsec);
 static int xv6_ensure_parent_dirs(char *path);
 static int vfs_open_path(char *path, int omode, struct file **fp);
 static int vfs_stat_path(char *path, struct vfs_node *node);
@@ -74,6 +83,7 @@ linux_utime_lock_init(void)
 static void
 linux_now_timespec(uint64 *sec, uint64 *nsec)
 {
+  // Convert xv6 ticks to a Linux-style timespec.
   acquire(&tickslock.l);
   *sec = ticks / 10;
   *nsec = (ticks % 10) * 100000000;
@@ -83,6 +93,7 @@ linux_now_timespec(uint64 *sec, uint64 *nsec)
 static struct linux_utime_entry *
 linux_utime_find(char *path, int alloc)
 {
+  // Look up or allocate the in-memory timestamp override for a path.
   struct linux_utime_entry *free = 0;
 
   for(int i = 0; i < LINUX_UTIME_SLOTS; i++){
@@ -104,6 +115,7 @@ linux_utime_find(char *path, int alloc)
 static void
 linux_share_vma_to_group(struct proc *p, struct vma *v)
 {
+  // CLONE_VM tasks need to see mmap regions created by sibling threads.
   if(p->linux_share_vm == 0)
     return;
 
@@ -163,6 +175,7 @@ fdalloc(struct file *f)
 static int
 linux_sock_copyin(uint64 addr, uint64 len, struct linux_sockaddr_in *sa)
 {
+  // Copy a userspace sockaddr_in, accepting short Linux sockaddr lengths.
   memset(sa, 0, sizeof(*sa));
   if(addr == 0 || len < 2)
     return -1;
@@ -176,6 +189,7 @@ linux_sock_copyin(uint64 addr, uint64 len, struct linux_sockaddr_in *sa)
 static int
 linux_sock_copyout(uint64 addr, uint64 lenaddr, struct linux_sockaddr_in *sa)
 {
+  // Copy sockaddr_in back and update the caller's socklen_t.
   uint64 len = sizeof(*sa);
 
   if(lenaddr != 0){
@@ -208,6 +222,7 @@ linux_sock_htons(ushort port)
 static ushort
 linux_sock_alloc_port(void)
 {
+  // Allocate simple ephemeral ports from the Linux dynamic range.
   ushort port = linux_next_port++;
   if(linux_next_port < 49152)
     linux_next_port = 49152;
@@ -217,6 +232,7 @@ linux_sock_alloc_port(void)
 static struct file *
 linux_sock_find_bound(ushort port, int stream)
 {
+  // Find an in-kernel socket bound to this local port and socket kind.
   extern struct {
     struct spinlock lock;
     struct file file[NFILE];
@@ -234,6 +250,7 @@ linux_sock_find_bound(ushort port, int stream)
 uint64
 sys_dup(void)
 {
+  // Duplicate a file descriptor into the lowest free slot.
   struct file *f;
   int fd;
 
@@ -248,6 +265,7 @@ sys_dup(void)
 uint64
 sys_linux_dup3(void)
 {
+  // Duplicate oldfd into exactly newfd, closing newfd first if needed.
   int oldfd, newfd, flags;
   struct proc *p = myproc();
   struct file *f;
@@ -275,6 +293,7 @@ sys_linux_dup3(void)
 uint64
 sys_linux_fcntl(void)
 {
+  // Linux fcntl subset for descriptor duplication and fd/status flags.
   int fd, cmd, arg;
   struct proc *p = myproc();
   struct file *f;
@@ -321,6 +340,7 @@ sys_linux_fcntl(void)
 uint64
 sys_linux_socket(void)
 {
+  // Create a minimal AF_INET stream/datagram socket backed by struct file.
   int domain, type, proto;
   struct file *f;
   int fd;
@@ -363,6 +383,7 @@ sys_linux_socket(void)
 uint64
 sys_linux_bind(void)
 {
+  // Bind a socket to a local IPv4 port; address contents are mostly ignored.
   struct file *f;
   uint64 addr, len;
   struct linux_sockaddr_in sa;
@@ -392,6 +413,7 @@ sys_linux_bind(void)
 uint64
 sys_linux_getsockname(void)
 {
+  // Return the socket's local address, auto-assigning a port if needed.
   struct file *f;
   uint64 addr, lenaddr;
 
@@ -411,12 +433,14 @@ sys_linux_getsockname(void)
 uint64
 sys_linux_setsockopt(void)
 {
+  // Stub: accept socket options without storing them.
   return 0;
 }
 
 uint64
 sys_linux_listen(void)
 {
+  // Mark a stream socket as accepting connections.
   struct file *f;
 
   if(argfd(0, 0, &f) < 0 || f->type != FD_SOCKET)
@@ -432,6 +456,7 @@ sys_linux_listen(void)
 uint64
 sys_linux_connect(void)
 {
+  // Mark a socket connected and notify a matching in-kernel listener.
   struct file *f, *listener;
   uint64 addr, len;
   struct linux_sockaddr_in sa;
@@ -466,6 +491,7 @@ sys_linux_connect(void)
 uint64
 sys_linux_accept(void)
 {
+  // Wait for a pending in-kernel stream connection and return a new socket fd.
   struct file *f, *nf;
   int fd;
   uint64 addr, lenaddr;
@@ -507,6 +533,7 @@ sys_linux_accept(void)
 uint64
 sys_linux_sendto(void)
 {
+  // Datagram send: enqueue one bounded packet on the destination port.
   struct file *f, *dst;
   uint64 buf, len, addr, addrlen;
   int flags;
@@ -534,6 +561,7 @@ sys_linux_sendto(void)
   if(f->sock_local.port == 0)
     f->sock_local.port = linux_sock_htons(linux_sock_alloc_port());
 
+  // Deliver to an already bound datagram socket in the local file table.
   linux_socket_lock_init();
   acquire(&linux_socket_lock);
   dst = linux_sock_find_bound(linux_sock_port(&sa), 0);
@@ -558,6 +586,7 @@ sys_linux_sendto(void)
 uint64
 sys_linux_recvfrom(void)
 {
+  // Datagram receive: block until a packet is queued, then copy data/source.
   struct file *f;
   uint64 buf, len, addr, addrlen;
   int flags;
@@ -592,6 +621,7 @@ sys_linux_recvfrom(void)
 uint64
 sys_read(void)
 {
+  // Read from an open file descriptor into user memory.
   struct file *f;
   int n;
   uint64 p;
@@ -606,6 +636,7 @@ sys_read(void)
 uint64
 sys_write(void)
 {
+  // Write from user memory to an open file descriptor.
   struct file *f;
   int n;
   uint64 p;
@@ -621,6 +652,7 @@ sys_write(void)
 uint64
 sys_close(void)
 {
+  // Close an xv6 file descriptor and drop its file reference.
   int fd;
   struct file *f;
 
@@ -635,6 +667,7 @@ sys_close(void)
 uint64
 sys_linux_close(void)
 {
+  // Linux close with EBADF-style error for invalid descriptors.
   int fd;
   struct file *f;
 
@@ -649,128 +682,197 @@ sys_linux_close(void)
   return 0;
 }
 
-uint64
-sys_mmap(void)
+static int
+linux_vma_slot(struct proc *p)
+{
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used == 0)
+      return i;
+  }
+  return -1;
+}
+
+static int
+linux_vma_overlaps(struct proc *p, uint64 addr, uint64 len)
+{
+  uint64 end = addr + len;
+
+  if(end < addr)
+    return 1;
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used == 0)
+      continue;
+    uint64 vstart = p->vmas[i].addr;
+    uint64 vend = vstart + p->vmas[i].len;
+    if(addr < vend && end > vstart)
+      return 1;
+  }
+  return 0;
+}
+
+static int
+linux_mmap_addr_ok(struct proc *p, uint64 addr, uint64 len)
+{
+  if(len == 0 || addr >= USYSCALL || addr + len < addr || addr + len > USYSCALL)
+    return 0;
+  if(addr < p->sz)
+    return 0;
+  if(addr < PGSIZE)
+    return 0;
+  return 1;
+}
+
+static uint64
+linux_mmap_pick_addr(struct proc *p, uint64 hint, uint64 len)
 {
   uint64 addr;
-  uint64 len;
-  int prot, flags, offset;
-  struct file *f;
-  struct vfs_node node;
-  struct proc *p = myproc();
 
-  argaddr(0, &addr);
-  argaddr(1, &len);
-  argint(2, &prot);
-  argint(3, &flags);
-  argint(5, &offset);
-
-  if(addr != 0 || len == 0 || offset != 0)
-    return -1;
-  if(argfd(4, 0, &f) < 0)
-    return -1;
-  if((flags != MAP_SHARED && flags != MAP_PRIVATE) ||
-     vfs_file_stat_node(f, &node) < 0 || node.type != T_FILE)
-    return -1;
-  if((prot & (PROT_READ | PROT_WRITE | PROT_EXEC)) == 0)
-    return -1;
-  if((prot & PROT_READ) && f->readable == 0)
-    return -1;
-  if((flags & MAP_SHARED) && (prot & PROT_WRITE) && f->writable == 0)
-    return -1;
-
-  int slot = -1;
-  for(int i = 0; i < NVMA; i++){
-    if(p->vmas[i].used == 0){
-      slot = i;
-      break;
-    }
+  if(hint != 0){
+    hint = PGROUNDDOWN(hint);
+    if(linux_mmap_addr_ok(p, hint, len) && linux_vma_overlaps(p, hint, len) == 0)
+      return hint;
   }
+
+  addr = PGROUNDDOWN(p->mmap_base - len);
+  while(linux_mmap_addr_ok(p, addr, len)){
+    if(linux_vma_overlaps(p, addr, len) == 0)
+      return addr;
+    if(addr < len + PGSIZE)
+      break;
+    addr = PGROUNDDOWN(addr - len);
+  }
+  return 0;
+}
+
+static uint64
+linux_mmap_create(uint64 addr, uint64 len, int prot, int flags, int fd,
+                  uint64 offset, int linux_abi)
+{
+  struct proc *p = myproc();
+  struct file *f = 0;
+  struct vfs_node node;
+  int map_type = flags & (MAP_SHARED | MAP_PRIVATE);
+  int anonymous = flags & MAP_ANONYMOUS;
+  uint64 maplen;
+  uint64 mapaddr;
+  int slot;
+
+  if(len == 0)
+    return linux_abi ? -22 : -1; // EINVAL
+  if(prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC))
+    return linux_abi ? -22 : -1; // EINVAL
+  if(map_type != MAP_SHARED && map_type != MAP_PRIVATE)
+    return linux_abi ? -22 : -1; // EINVAL
+  if((offset % PGSIZE) != 0)
+    return linux_abi ? -22 : -1; // EINVAL
+
+  maplen = PGROUNDUP(len);
+  if(maplen == 0 || maplen < len)
+    return linux_abi ? -12 : -1; // ENOMEM
+
+  if(anonymous == 0){
+    if(fd < 0 || fd >= NOFILE || (f = p->ofile[fd]) == 0)
+      return linux_abi ? -9 : -1; // EBADF
+    if(vfs_file_stat_node(f, &node) < 0 || node.type != T_FILE)
+      return linux_abi ? -13 : -1; // EACCES
+    if((prot & PROT_READ) && f->readable == 0)
+      return linux_abi ? -13 : -1; // EACCES
+    if((flags & MAP_SHARED) && (prot & PROT_WRITE) && f->writable == 0)
+      return linux_abi ? -13 : -1; // EACCES
+  } else {
+    memset(&node, 0, sizeof(node));
+  }
+
+  if(flags & MAP_FIXED){
+    if((addr % PGSIZE) != 0 || linux_mmap_addr_ok(p, addr, maplen) == 0)
+      return linux_abi ? -22 : -1; // EINVAL
+    if(linux_vma_overlaps(p, addr, maplen) && proc_munmap(p, addr, maplen) < 0)
+      return linux_abi ? -12 : -1; // ENOMEM
+    mapaddr = addr;
+  } else {
+    mapaddr = linux_mmap_pick_addr(p, addr, maplen);
+    if(mapaddr == 0)
+      return linux_abi ? -12 : -1; // ENOMEM
+  }
+
+  slot = linux_vma_slot(p);
   if(slot < 0)
-    return -1;
+    return linux_abi ? -12 : -1; // ENOMEM
 
-  uint64 maplen = PGROUNDUP(len);
-  uint64 mapaddr = PGROUNDDOWN(p->mmap_base - maplen);
-  if(mapaddr < p->sz || mapaddr + maplen > USYSCALL)
-    return -1;
-
-  p->mmap_base = mapaddr;
+  if(mapaddr < p->mmap_base)
+    p->mmap_base = mapaddr;
   p->vmas[slot].used = 1;
   p->vmas[slot].addr = mapaddr;
   p->vmas[slot].len = maplen;
-  p->vmas[slot].filelen = node.size;
+  p->vmas[slot].filelen = anonymous ? 0 : node.size;
   p->vmas[slot].prot = prot;
   p->vmas[slot].flags = flags;
-  p->vmas[slot].offset = 0;
-  p->vmas[slot].f = filedup(f);
+  p->vmas[slot].offset = offset;
+  p->vmas[slot].f = anonymous ? 0 : filedup(f);
   linux_share_vma_to_group(p, &p->vmas[slot]);
 
   return mapaddr;
 }
 
 uint64
-sys_linux_mmap(void)
+sys_mmap(void)
 {
+  // xv6 mmap: create a lazy file-backed VMA at the next downward address.
   uint64 addr;
   uint64 len;
-  int prot, flags, fd, offset;
-  struct proc *p = myproc();
+  int prot, flags;
+  uint64 offset;
+  int fd;
 
   argaddr(0, &addr);
   argaddr(1, &len);
   argint(2, &prot);
   argint(3, &flags);
   argint(4, &fd);
-  argint(5, &offset);
+  argaddr(5, &offset);
+  return linux_mmap_create(addr, len, prot, flags, fd, offset, 0);
+}
 
-  if(addr != 0 || len == 0 || offset != 0)
-    return -1;
-  if((flags & 0x20) == 0) // MAP_ANONYMOUS
-    return sys_mmap();
+uint64
+sys_linux_mmap(void)
+{
+  // Linux mmap subset: anonymous mappings here, file mappings via sys_mmap().
+  uint64 addr;
+  uint64 len;
+  int prot, flags, fd;
+  uint64 offset;
 
-  int slot = -1;
-  for(int i = 0; i < NVMA; i++){
-    if(p->vmas[i].used == 0){
-      slot = i;
-      break;
-    }
-  }
-  if(slot < 0)
-    return -1;
-
-  uint64 maplen = PGROUNDUP(len);
-  uint64 mapaddr = PGROUNDDOWN(p->mmap_base - maplen);
-  if(mapaddr < p->sz || mapaddr + maplen > USYSCALL)
-    return -1;
-
-  p->mmap_base = mapaddr;
-  p->vmas[slot].used = 1;
-  p->vmas[slot].addr = mapaddr;
-  p->vmas[slot].len = maplen;
-  p->vmas[slot].filelen = 0;
-  p->vmas[slot].prot = prot;
-  p->vmas[slot].flags = flags;
-  p->vmas[slot].offset = 0;
-  p->vmas[slot].f = 0;
-  linux_share_vma_to_group(p, &p->vmas[slot]);
-  return mapaddr;
+  argaddr(0, &addr);
+  argaddr(1, &len);
+  argint(2, &prot);
+  argint(3, &flags);
+  argint(4, &fd);
+  argaddr(5, &offset);
+  return linux_mmap_create(addr, len, prot, flags, fd, offset, 1);
 }
 
 uint64
 sys_munmap(void)
 {
+  // Remove a mapped VMA range and write back shared dirty file pages.
   uint64 addr, len;
+  struct proc *p = myproc();
   argaddr(0, &addr);
   argaddr(1, &len);
 
-  if(proc_munmap(myproc(), addr, PGROUNDUP(len)) < 0)
-    return -1;
+  if(len == 0)
+    return 0;
+  if((addr % PGSIZE) != 0 || addr + len < addr)
+    return p->is_linux ? -22 : -1; // EINVAL
+  if(proc_munmap(p, addr, PGROUNDUP(len)) < 0)
+    return p->is_linux ? -22 : -1; // EINVAL
   return 0;
 }
 
 static int
 linux_mprotect_one(struct proc *p, uint64 start, uint64 end, int prot)
 {
+  // Change protection for a subrange of one tracked VMA, splitting if needed.
   for(int i = 0; i < NVMA; i++){
     if(p->vmas[i].used == 0)
       continue;
@@ -782,6 +884,7 @@ linux_mprotect_one(struct proc *p, uint64 start, uint64 end, int prot)
         need++;
       if(end < old.addr + old.len)
         need++;
+      // Reserve slots for left/right fragments before mutating the VMA table.
       int slots[2];
       for(int j = 0; j < need; j++){
         slots[j] = -1;
@@ -795,7 +898,7 @@ linux_mprotect_one(struct proc *p, uint64 start, uint64 end, int prot)
         if(slots[j] < 0){
           for(int k = 0; k < j; k++)
             p->vmas[slots[k]].used = 0;
-          return -1;
+          return -12; // ENOMEM
         }
       }
       for(int j = 0; j < need; j++)
@@ -824,6 +927,7 @@ linux_mprotect_one(struct proc *p, uint64 start, uint64 end, int prot)
         if(p->vmas[slots[s]].f)
           filedup(p->vmas[slots[s]].f);
       }
+      // Already-faulted pages need their PTE permissions updated immediately.
       for(uint64 a = start; a < end; a += PGSIZE){
         pte_t *pte = walk(p->pagetable, a, 0);
         if(pte == 0 || (*pte & PTE_V) == 0)
@@ -845,12 +949,42 @@ linux_mprotect_one(struct proc *p, uint64 start, uint64 end, int prot)
       return 0;
     }
   }
-  return -1;
+  return -12; // ENOMEM
+}
+
+static int
+linux_mprotect_mapped_pages(struct proc *p, uint64 start, uint64 end, int prot)
+{
+  // Fallback for ELF loader segments that are mapped but not recorded as VMAs.
+  int perm = PTE_U;
+
+  if(prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC))
+    return -22; // EINVAL
+  if(prot & PROT_READ)
+    perm |= PTE_R;
+  if(prot & PROT_WRITE)
+    perm |= PTE_W;
+  if(prot & PROT_EXEC)
+    perm |= PTE_X;
+
+  for(uint64 a = start; a < end; a += PGSIZE){
+    pte_t *pte = walk(p->pagetable, a, 0);
+    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
+      return -12; // ENOMEM
+  }
+
+  for(uint64 a = start; a < end; a += PGSIZE){
+    pte_t *pte = walk(p->pagetable, a, 0);
+    uint64 pa = PTE2PA(*pte);
+    *pte = PA2PTE(pa) | perm | PTE_V;
+  }
+  return 0;
 }
 
 uint64
 sys_linux_mprotect(void)
 {
+  // Linux mprotect: update VMA metadata and current PTE permissions.
   uint64 addr, len;
   int prot;
   struct proc *p = myproc();
@@ -860,18 +994,24 @@ sys_linux_mprotect(void)
   argint(2, &prot);
   if(len == 0)
     return 0;
+  if((addr % PGSIZE) != 0 || addr + len < addr)
+    return -22; // EINVAL
+  if(prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC))
+    return -22; // EINVAL
 
-  uint64 start = PGROUNDDOWN(addr);
+  uint64 start = addr;
   uint64 end = PGROUNDUP(addr + len);
-  if(linux_mprotect_one(p, start, end, prot) < 0)
-    return -1;
+  if(linux_mprotect_one(p, start, end, prot) < 0 &&
+     linux_mprotect_mapped_pages(p, start, end, prot) < 0)
+    return -12; // ENOMEM
 
   if(p->linux_share_vm){
     for(struct proc *q = proc; q < &proc[NPROC]; q++){
       if(q == p || q->state == UNUSED || q->pagetable == 0)
         continue;
-      if(linux_tgid(q) == linux_tgid(p))
-        linux_mprotect_one(q, start, end, prot);
+      if(linux_tgid(q) == linux_tgid(p) &&
+         linux_mprotect_one(q, start, end, prot) < 0)
+        linux_mprotect_mapped_pages(q, start, end, prot);
     }
   }
   return 0;
@@ -880,6 +1020,7 @@ sys_linux_mprotect(void)
 uint64
 sys_fstat(void)
 {
+  // Stat an open xv6 file descriptor.
   struct file *f;
   uint64 st; // user pointer to struct stat
 
@@ -893,6 +1034,7 @@ sys_fstat(void)
 uint64
 sys_link(void)
 {
+  // Create a hard link; both paths must resolve to the same mounted FS.
   char new[MAXPATH], old[MAXPATH], actual_old[MAXPATH], actual_new[MAXPATH];
   struct vfs_path oldvp, newvp;
   struct proc *p = myproc();
@@ -912,6 +1054,7 @@ sys_link(void)
 uint64
 sys_unlink(void)
 {
+  // Remove a filesystem entry, redirecting ext4 writes into writable xv6 space.
   char path[MAXPATH], actual[MAXPATH];
   struct vfs_path vp;
   struct proc *p = myproc();
@@ -928,6 +1071,7 @@ sys_unlink(void)
 static int
 xv6_ensure_parent_dirs(char *path)
 {
+  // Create each missing parent directory for redirected ext4 write paths.
   char cur[MAXPATH];
   int len;
 
@@ -958,6 +1102,7 @@ xv6_ensure_parent_dirs(char *path)
 static int
 vfs_open_path(char *path, int omode, struct file **fp)
 {
+  // Resolve an absolute VFS path and dispatch to that filesystem's open op.
   struct vfs_path vp;
 
   if(path == 0 || fp == 0)
@@ -971,6 +1116,7 @@ vfs_open_path(char *path, int omode, struct file **fp)
 static int
 vfs_stat_path(char *path, struct vfs_node *node)
 {
+  // Resolve an absolute VFS path and fetch its generic node metadata.
   struct vfs_path vp;
 
   if(path == 0 || node == 0)
@@ -982,9 +1128,76 @@ vfs_stat_path(char *path, struct vfs_node *node)
 }
 
 static int
+linux_stat_proc_path(struct proc *p, char *path, struct vfs_path *vp,
+                     struct vfs_node *node, char *actual, int actualsz)
+{
+  char rpath[MAXPATH];
+  struct vfs_path tmp;
+
+  if(p == 0 || path == 0 || node == 0)
+    return -2; // ENOENT
+
+  if(vfs_redirect_proc_path(p, path, rpath, sizeof(rpath)) == 0 &&
+     vfs_stat_path(rpath, node) == 0){
+    if(vp)
+      vfs_resolve(rpath, vp);
+    if(actual && actualsz > 0)
+      safestrcpy(actual, rpath, actualsz);
+    return 0;
+  }
+
+  if(vp == 0){
+    vp = &tmp;
+  }
+  if(vfs_resolve_proc_path(p, path, vp) == 0 &&
+     vp->ops && vp->ops->inode && vp->ops->inode->lookup &&
+     vp->ops->inode->lookup(vp->mount, vp->inner, node) == 0){
+    if(actual && actualsz > 0)
+      safestrcpy(actual, vp->abs_path, actualsz);
+    return 0;
+  }
+
+  return -2; // ENOENT
+}
+
+static void
+linux_apply_times(uint64 *atime_sec, uint64 *atime_nsec,
+                  uint64 *mtime_sec, uint64 *mtime_nsec, int have_ts,
+                  uint64 *ts, uint64 now_sec, uint64 now_nsec)
+{
+  if(have_ts == 0){
+    *atime_sec = now_sec;
+    *atime_nsec = now_nsec;
+    *mtime_sec = now_sec;
+    *mtime_nsec = now_nsec;
+    return;
+  }
+
+  if(ts[1] != LINUX_UTIME_OMIT){
+    if(ts[1] == LINUX_UTIME_NOW){
+      *atime_sec = now_sec;
+      *atime_nsec = now_nsec;
+    } else {
+      *atime_sec = ts[0];
+      *atime_nsec = ts[1];
+    }
+  }
+  if(ts[3] != LINUX_UTIME_OMIT){
+    if(ts[3] == LINUX_UTIME_NOW){
+      *mtime_sec = now_sec;
+      *mtime_nsec = now_nsec;
+    } else {
+      *mtime_sec = ts[2];
+      *mtime_nsec = ts[3];
+    }
+  }
+}
+
+static int
 vfs_prepare_write_path(struct proc *p, char *path, char *actual, int actualsz,
                        struct vfs_path *vp)
 {
+  // Linux ext4 root is read-only; relative writes are redirected under /tmp.
   char rpath[MAXPATH];
 
   if(p == 0 || path == 0 || actual == 0 || actualsz <= 0 || vp == 0)
@@ -1004,6 +1217,7 @@ vfs_prepare_write_path(struct proc *p, char *path, char *actual, int actualsz,
 static int
 vfs_sync_legacy_cwd(struct proc *p, struct vfs_path *vp)
 {
+  // Keep p->cwd valid for old xv6 filesystem code when cwd is on xv6 FS.
   struct inode *ip;
 
   if(p == 0 || vp == 0)
@@ -1038,6 +1252,7 @@ vfs_sync_legacy_cwd(struct proc *p, struct vfs_path *vp)
 static void
 linux_sync_fs_to_group(struct proc *src, struct vfs_path *vp)
 {
+  // CLONE_FS threads share cwd/root state, so propagate chdir changes.
   if(src == 0 || src->linux_share_fs == 0)
     return;
 
@@ -1054,6 +1269,7 @@ linux_sync_fs_to_group(struct proc *src, struct vfs_path *vp)
 uint64
 sys_open(void)
 {
+  // Open or create a file through VFS, honoring redirected ext4 writes.
   char path[MAXPATH];
   char rpath[MAXPATH];
   char actual[MAXPATH];
@@ -1069,6 +1285,7 @@ sys_open(void)
     return -1;
 
   if((omode & O_CREATE) == 0){
+    // Reads prefer redirected writable copies, then fall back to original path.
     if(vfs_redirect_proc_path(p, path, rpath, sizeof(rpath)) == 0 &&
        vfs_open_path(rpath, omode, &f) == 0){
       if((fd = fdalloc(f)) < 0){
@@ -1089,6 +1306,7 @@ sys_open(void)
     return -1;
   }
 
+  // Creates always go through the write-path resolver.
   if(vfs_prepare_write_path(p, path, actual, sizeof(actual), &vp) < 0 ||
      vp.ops == 0 || vp.ops->inode == 0 || vp.ops->inode->create == 0 ||
      vp.ops->file == 0 || vp.ops->file->open == 0 ||
@@ -1105,6 +1323,7 @@ sys_open(void)
 static int
 linux_open_flags(int flags)
 {
+  // Translate the small Linux open flag subset used by the compat layer.
   int omode = flags & 3;
   if(flags & 0x40)   // O_CREAT
     omode |= O_CREATE;
@@ -1113,10 +1332,42 @@ linux_open_flags(int flags)
   return omode;
 }
 
+static int
+linux_openat_resolve(struct proc *p, int dirfd, char *path, char *out, int outsz)
+{
+  char base[MAXPATH];
+  struct file *df;
+
+  if(p == 0 || path == 0 || out == 0 || outsz <= 0)
+    return -1;
+  if(path[0] == '/' || dirfd == -100){
+    safestrcpy(out, path, outsz);
+    return 0;
+  }
+  if(dirfd < 0 || dirfd >= NOFILE || (df = p->ofile[dirfd]) == 0)
+    return -1;
+
+  if(df->type == FD_EXT4){
+    if(p->vfs_root.mount && p->vfs_root.mount->type == VFS_EXT4)
+      safestrcpy(base, df->ext4_path, sizeof(base));
+    else
+      snprintf(base, sizeof(base), "/ext4%s", df->ext4_path);
+    vfs_join_path(out, outsz, base, path);
+    return 0;
+  }
+  if(df->type == FD_INODE && df->ip && df->ip->inum == ROOTINO){
+    vfs_join_path(out, outsz, "/", path);
+    return 0;
+  }
+  return -1;
+}
+
 uint64
 sys_linux_openat(void)
 {
+  // Linux openat subset with directory-fd relative path handling.
   char path[MAXPATH];
+  char opath[MAXPATH];
   char rpath[MAXPATH];
   char actual[MAXPATH];
   int fd, dirfd, flags, omode;
@@ -1130,8 +1381,9 @@ sys_linux_openat(void)
   argint(2, &flags);
   argaddr(3, &mode);
   if(argstr(1, path, MAXPATH) < 0)
-    return -1;
-  (void)dirfd;
+    return -14; // EFAULT
+  if(linux_openat_resolve(p, dirfd, path, opath, sizeof(opath)) < 0)
+    return -9; // EBADF
   int has_fd = 0;
   for(int i = 0; i < NOFILE; i++){
     if(p->ofile[i] == 0){
@@ -1143,36 +1395,37 @@ sys_linux_openat(void)
     return -24; // EMFILE
   omode = linux_open_flags(flags);
   if((omode & O_CREATE) == 0){
-    if(vfs_redirect_proc_path(p, path, rpath, sizeof(rpath)) == 0 &&
+    // Prefer redirected copies for relative paths under the Linux ext4 root.
+    if(vfs_redirect_proc_path(p, opath, rpath, sizeof(rpath)) == 0 &&
        vfs_open_path(rpath, omode, &f) == 0){
       if((fd = fdalloc(f)) < 0){
         fileclose(f);
-        return -1;
+        return -24; // EMFILE
       }
       return fd;
     }
-    if(vfs_resolve_proc_path(p, path, &vp) == 0 &&
+    if(vfs_resolve_proc_path(p, opath, &vp) == 0 &&
        vp.ops && vp.ops->file && vp.ops->file->open &&
        vp.ops->file->open(vp.mount, vp.inner, omode, &f) == 0){
       if((fd = fdalloc(f)) < 0){
         fileclose(f);
-        return -1;
+        return -24; // EMFILE
       }
       return fd;
     }
-    return -1;
+    return -2; // ENOENT
   }
 
-  if(vfs_prepare_write_path(p, path, actual, sizeof(actual), &vp) < 0 ||
+  if(vfs_prepare_write_path(p, opath, actual, sizeof(actual), &vp) < 0 ||
      vp.ops == 0 || vp.ops->inode == 0 || vp.ops->inode->create == 0 ||
      vp.ops->file == 0 || vp.ops->file->open == 0 ||
      vp.ops->inode->create(vp.mount, vp.inner, T_FILE, mode, &node) < 0 ||
      vp.ops->file->open(vp.mount, vp.inner, omode & ~O_CREATE, &f) < 0)
-    return -1;
+    return -2; // ENOENT
 
   if((fd = fdalloc(f)) < 0){
     fileclose(f);
-    return -1;
+    return -24; // EMFILE
   }
   return fd;
 }
@@ -1180,6 +1433,7 @@ sys_linux_openat(void)
 uint64
 sys_linux_writev(void)
 {
+  // Write each iovec in order, returning bytes written before any failure.
   struct file *f;
   int fd, iovcnt;
   uint64 iov;
@@ -1189,18 +1443,20 @@ sys_linux_writev(void)
   argint(0, &fd);
   argaddr(1, &iov);
   argint(2, &iovcnt);
-  if(argfd(0, 0, &f) < 0 || iovcnt < 0 || iovcnt > 16)
-    return -1;
+  if(argfd(0, 0, &f) < 0)
+    return -9; // EBADF
+  if(iovcnt < 0 || iovcnt > 16)
+    return -22; // EINVAL
 
   for(int i = 0; i < iovcnt; i++){
     if(fetchaddr(iov + i * 16, &base) < 0 ||
        fetchaddr(iov + i * 16 + 8, &len) < 0)
-      return -1;
+      return -14; // EFAULT
     if(len > 0x7fffffff)
-      return -1;
+      return -22; // EINVAL
     int n = filewrite(f, base, len);
     if(n < 0)
-      return total > 0 ? total : -1;
+      return total > 0 ? total : -9; // EBADF
     total += n;
   }
   return total;
@@ -1209,6 +1465,7 @@ sys_linux_writev(void)
 uint64
 sys_linux_readv(void)
 {
+  // Read into each iovec in order, stopping on short read.
   struct file *f;
   int fd, iovcnt;
   uint64 iov;
@@ -1218,18 +1475,20 @@ sys_linux_readv(void)
   argint(0, &fd);
   argaddr(1, &iov);
   argint(2, &iovcnt);
-  if(argfd(0, 0, &f) < 0 || iovcnt < 0 || iovcnt > 16)
-    return -1;
+  if(argfd(0, 0, &f) < 0)
+    return -9; // EBADF
+  if(iovcnt < 0 || iovcnt > 16)
+    return -22; // EINVAL
 
   for(int i = 0; i < iovcnt; i++){
     if(fetchaddr(iov + i * 16, &base) < 0 ||
        fetchaddr(iov + i * 16 + 8, &len) < 0)
-      return -1;
+      return -14; // EFAULT
     if(len > 0x7fffffff)
-      return -1;
+      return -22; // EINVAL
     int n = fileread(f, base, len);
     if(n < 0)
-      return total > 0 ? total : -1;
+      return total > 0 ? total : -9; // EBADF
     total += n;
     if(n < len)
       break;
@@ -1240,6 +1499,7 @@ sys_linux_readv(void)
 uint64
 sys_linux_lseek(void)
 {
+  // Dispatch lseek to the backing VFS file operation.
   int fd, whence;
   uint64 off;
   struct file *f;
@@ -1248,16 +1508,17 @@ sys_linux_lseek(void)
   argaddr(1, &off);
   argint(2, &whence);
   if(argfd(0, 0, &f) < 0)
-    return -1;
+    return -9; // EBADF
 
   if(f->vfs_ops && f->vfs_ops->file && f->vfs_ops->file->lseek)
     return f->vfs_ops->file->lseek(f, off, whence);
-  return -1;
+  return -29; // ESPIPE
 }
 
 uint64
 sys_linux_pread64(void)
 {
+  // Positional read implemented by temporarily swapping the file offset.
   struct file *f;
   uint64 buf, off;
   int fd, n;
@@ -1268,8 +1529,10 @@ sys_linux_pread64(void)
   argaddr(1, &buf);
   argint(2, &n);
   argaddr(3, &off);
-  if(argfd(0, 0, &f) < 0 || n < 0)
-    return -1;
+  if(argfd(0, 0, &f) < 0)
+    return -9; // EBADF
+  if(n < 0)
+    return -22; // EINVAL
 
   oldoff = f->off;
   f->off = off;
@@ -1281,12 +1544,13 @@ sys_linux_pread64(void)
 uint64
 sys_linux_statfs(void)
 {
+  // Return a fixed statfs structure sufficient for Linux userland probes.
   uint64 buf;
   char path[MAXPATH];
   uint64 st[15];
 
   if(argstr(0, path, MAXPATH) < 0)
-    return -1;
+    return -14; // EFAULT
   argaddr(1, &buf);
   memset(st, 0, sizeof(st));
   st[0] = 0x10203040; // f_type
@@ -1299,17 +1563,19 @@ sys_linux_statfs(void)
   st[8] = DIRSIZ;     // f_namelen
   st[9] = BSIZE;      // f_frsize
   if(copyout(myproc()->pagetable, buf, (char *)st, sizeof(st)) < 0)
-    return -1;
+    return -14; // EFAULT
   return 0;
 }
 
 uint64
 sys_linux_sendfile(void)
 {
+  // Copy bytes from a regular input file into a pipe without user bounce.
   int outfd, infd;
   uint64 offaddr, count;
   uint64 off;
   uint64 done = 0;
+  int err = 0;
   struct proc *p = myproc();
   struct file *outf, *inf;
   struct vfs_node node;
@@ -1321,24 +1587,25 @@ sys_linux_sendfile(void)
   argaddr(3, &count);
 
   if(outfd < 0 || outfd >= NOFILE || infd < 0 || infd >= NOFILE)
-    return -1;
+    return -9; // EBADF
   if((outf = p->ofile[outfd]) == 0 || (inf = p->ofile[infd]) == 0)
-    return -1;
+    return -9; // EBADF
   if(outf->type != FD_PIPE || outf->writable == 0)
-    return -1;
+    return -22; // EINVAL
   if(vfs_file_stat_node(inf, &node) < 0 || node.type != T_FILE)
-    return -1;
+    return -22; // EINVAL
   if(offaddr != 0){
     if(fetchaddr(offaddr, &off) < 0)
-      return -1;
+      return -14; // EFAULT
   } else {
     off = inf->off;
   }
 
   buf = kalloc();
   if(buf == 0)
-    return -1;
+    return -12; // ENOMEM
 
+  // Move data in page-sized chunks through a temporary kernel buffer.
   while(done < count){
     int n = count - done;
     int r, w;
@@ -1352,7 +1619,7 @@ sys_linux_sendfile(void)
     w = pipewrite_kernel(outf->pipe, buf, r);
     if(w < 0){
       if(done == 0)
-        done = -1;
+        err = -32; // EPIPE
       break;
     }
     done += w;
@@ -1362,18 +1629,21 @@ sys_linux_sendfile(void)
   }
 
   kfree(buf);
-  if(done != (uint64)-1 && done > 0){
+  if(done > 0){
     if(offaddr != 0)
       copyout(p->pagetable, offaddr, (char *)&off, sizeof(off));
     else
       inf->off = off;
   }
+  if(err)
+    return err;
   return done;
 }
 
 uint64
 sys_linux_ppoll(void)
 {
+  // Minimal poll: report existing descriptors as ready without sleeping.
   uint64 fds;
   int nfds;
   int ready = 0;
@@ -1382,7 +1652,7 @@ sys_linux_ppoll(void)
   argaddr(0, &fds);
   argint(1, &nfds);
   if(nfds < 0 || nfds > 64)
-    return -1;
+    return -22; // EINVAL
 
   for(int i = 0; i < nfds; i++){
     uint64 addr = fds + i * 8;
@@ -1392,7 +1662,7 @@ sys_linux_ppoll(void)
 
     if(copyin(p->pagetable, (char *)&fd, addr, sizeof(fd)) < 0 ||
        copyin(p->pagetable, (char *)&events, addr + 4, sizeof(events)) < 0)
-      return -1;
+      return -14; // EFAULT
     if(fd >= 0 && fd < NOFILE && p->ofile[fd]){
       revents = events & 0x5; // POLLIN | POLLOUT
       if(revents == 0)
@@ -1400,7 +1670,7 @@ sys_linux_ppoll(void)
       ready++;
     }
     if(copyout(p->pagetable, addr + 6, (char *)&revents, sizeof(revents)) < 0)
-      return -1;
+      return -14; // EFAULT
   }
   return ready;
 }
@@ -1408,8 +1678,9 @@ sys_linux_ppoll(void)
 uint64
 sys_linux_newfstatat(void)
 {
+  // Linux stat by path, checking redirected copy before original VFS path.
   char path[MAXPATH];
-  char rpath[MAXPATH];
+  char actual[MAXPATH];
   uint64 staddr;
   int dirfd, flags;
   struct vfs_path vp;
@@ -1422,20 +1693,16 @@ sys_linux_newfstatat(void)
   argint(3, &flags);
   (void)flags;
   if(argstr(1, path, MAXPATH) < 0)
-    return -1;
-  if(path[0] == 0)
-    return -1;
-  (void)dirfd;
+    return -14; // EFAULT
+  if(path[0] == 0){
+    struct file *f;
 
-  if(vfs_redirect_proc_path(p, path, rpath, sizeof(rpath)) == 0 &&
-     vfs_stat_path(rpath, &node) == 0){
-    mode = node.mode | 0777;
-    return linux_copy_stat_time(staddr, FIRSTDEV, node.ino, mode, 1, node.size, path, 0);
-  }
-
-  if(vfs_resolve_proc_path(p, path, &vp) == 0 &&
-     vp.ops && vp.ops->inode && vp.ops->inode->lookup &&
-     vp.ops->inode->lookup(vp.mount, vp.inner, &node) == 0){
+    if((flags & 0x1000) == 0)
+      return -2; // ENOENT
+    if(dirfd < 0 || dirfd >= NOFILE || (f = p->ofile[dirfd]) == 0)
+      return -9; // EBADF
+    if(vfs_file_stat_node(f, &node) < 0)
+      return -9; // EBADF
     mode = node.mode | 0777;
     if(mode == 0777){
       if(node.type == T_DIR)
@@ -1445,22 +1712,42 @@ sys_linux_newfstatat(void)
       else
         mode = 0100000 | 0777;
     }
-    return linux_copy_stat_time(staddr, FIRSTDEV, node.ino, mode, 1, node.size, path, 0);
+    return linux_copy_stat_time(staddr, FIRSTDEV, node.ino, mode, 1,
+                                node.size, 0, f);
   }
+  (void)dirfd;
 
-  return -2; // ENOENT
+  if(linux_stat_proc_path(p, path, &vp, &node, actual, sizeof(actual)) < 0)
+    return -2; // ENOENT
+
+  mode = node.mode | 0777;
+  if(mode == 0777){
+    if(node.type == T_DIR)
+      mode = 0040000 | 0777;
+    else if(node.type == T_DEVICE)
+      mode = 0020000 | 0777;
+    else
+      mode = 0100000 | 0777;
+  }
+  return linux_copy_stat_time(staddr, FIRSTDEV, node.ino, mode, 1, node.size,
+                              actual, 0);
 }
 
 uint64
 sys_linux_utimensat(void)
 {
+  // Store Linux atime/mtime updates in memory after resolving the target.
   int dirfd, flags;
   uint64 pathaddr, times;
   char path[MAXPATH];
+  char actual[MAXPATH];
   uint64 now_sec, now_nsec;
   uint64 ts[4];
   int have_ts = 0;
   struct file *f = 0;
+  struct vfs_node node;
+  struct proc *p = myproc();
+  uint64 atime_sec = 0, atime_nsec = 0, mtime_sec = 0, mtime_nsec = 0;
 
   argint(0, &dirfd);
   argaddr(1, &pathaddr);
@@ -1469,14 +1756,18 @@ sys_linux_utimensat(void)
   (void)flags;
 
   if(pathaddr == 0){
-    struct proc *p = myproc();
     if(dirfd < 0 || dirfd >= NOFILE || (f = p->ofile[dirfd]) == 0)
       return -9; // EBADF
-    safestrcpy(path, "", sizeof(path));
+    if(f->ext4_path[0])
+      safestrcpy(actual, f->ext4_path, sizeof(actual));
+    else
+      actual[0] = 0;
   } else {
     if(argstr(1, path, MAXPATH) < 0)
       return -14; // EFAULT
     if(path[0] == 0)
+      return -2; // ENOENT
+    if(linux_stat_proc_path(p, path, 0, &node, actual, sizeof(actual)) < 0)
       return -2; // ENOENT
   }
 
@@ -1489,36 +1780,22 @@ sys_linux_utimensat(void)
   }
 
   if(f){
+    // fd-based update: attach timestamps to this open file and optional path.
     f->has_time = 1;
-    if(times == 0){
-      f->atime_sec = now_sec;
-      f->atime_nsec = now_nsec;
-      f->mtime_sec = now_sec;
-      f->mtime_nsec = now_nsec;
-    } else {
-      if(ts[1] != LINUX_UTIME_OMIT){
-        if(ts[1] == LINUX_UTIME_NOW){
-          f->atime_sec = now_sec;
-          f->atime_nsec = now_nsec;
-        } else {
-          f->atime_sec = ts[0];
-          f->atime_nsec = ts[1];
-        }
-      }
-      if(ts[3] != LINUX_UTIME_OMIT){
-        if(ts[3] == LINUX_UTIME_NOW){
-          f->mtime_sec = now_sec;
-          f->mtime_nsec = now_nsec;
-        } else {
-          f->mtime_sec = ts[2];
-          f->mtime_nsec = ts[3];
-        }
-      }
-    }
-    if(f->ext4_path[0]){
+    atime_sec = f->atime_sec;
+    atime_nsec = f->atime_nsec;
+    mtime_sec = f->mtime_sec;
+    mtime_nsec = f->mtime_nsec;
+    linux_apply_times(&atime_sec, &atime_nsec, &mtime_sec, &mtime_nsec,
+                      have_ts, ts, now_sec, now_nsec);
+    f->atime_sec = atime_sec;
+    f->atime_nsec = atime_nsec;
+    f->mtime_sec = mtime_sec;
+    f->mtime_nsec = mtime_nsec;
+    if(actual[0]){
       linux_utime_lock_init();
       acquire(&linux_utime_lock);
-      struct linux_utime_entry *e = linux_utime_find(f->ext4_path, 1);
+      struct linux_utime_entry *e = linux_utime_find(actual, 1);
       if(e){
         e->atime_sec = f->atime_sec;
         e->atime_nsec = f->atime_nsec;
@@ -1546,39 +1823,17 @@ sys_linux_utimensat(void)
     return 0;
   }
 
+  // path-based update: remember timestamps in the global small override table.
   linux_utime_lock_init();
   acquire(&linux_utime_lock);
-  struct linux_utime_entry *e = linux_utime_find(path, 1);
+  struct linux_utime_entry *e = linux_utime_find(actual, 1);
   if(e == 0){
     release(&linux_utime_lock);
     return -12; // ENOMEM
   }
 
-  if(have_ts == 0){
-    e->atime_sec = now_sec;
-    e->atime_nsec = now_nsec;
-    e->mtime_sec = now_sec;
-    e->mtime_nsec = now_nsec;
-  } else {
-    if(ts[1] != LINUX_UTIME_OMIT){
-      if(ts[1] == LINUX_UTIME_NOW){
-        e->atime_sec = now_sec;
-        e->atime_nsec = now_nsec;
-      } else {
-        e->atime_sec = ts[0];
-        e->atime_nsec = ts[1];
-      }
-    }
-    if(ts[3] != LINUX_UTIME_OMIT){
-      if(ts[3] == LINUX_UTIME_NOW){
-        e->mtime_sec = now_sec;
-        e->mtime_nsec = now_nsec;
-      } else {
-        e->mtime_sec = ts[2];
-        e->mtime_nsec = ts[3];
-      }
-    }
-  }
+  linux_apply_times(&e->atime_sec, &e->atime_nsec, &e->mtime_sec,
+                    &e->mtime_nsec, have_ts, ts, now_sec, now_nsec);
   linux_last_utime = *e;
   release(&linux_utime_lock);
   return 0;
@@ -1589,6 +1844,7 @@ linux_copy_stat_time(uint64 staddr, uint64 dev, uint64 ino,
                      uint64 mode, uint64 nlink, uint64 size, char *path,
                      struct file *tf)
 {
+  // Build the riscv64 Linux stat layout used by glibc.
   char st[128];
   uint mode32 = mode;
   uint nlink32 = nlink;
@@ -1600,6 +1856,7 @@ linux_copy_stat_time(uint64 staddr, uint64 dev, uint64 ino,
 
   memset(st, 0, sizeof(st));
   if(tf && tf->has_time){
+    // Prefer timestamps stored on the open file.
     atime_sec = tf->atime_sec;
     atime_nsec = tf->atime_nsec;
     mtime_sec = tf->mtime_sec;
@@ -1607,6 +1864,7 @@ linux_copy_stat_time(uint64 staddr, uint64 dev, uint64 ino,
     ctime_sec = mtime_sec;
     ctime_nsec = mtime_nsec;
   } else if(path){
+    // Otherwise use path timestamp overrides from utimensat().
     linux_utime_lock_init();
     acquire(&linux_utime_lock);
     struct linux_utime_entry *e = linux_utime_find(path, 0);
@@ -1643,6 +1901,7 @@ linux_copy_stat_time(uint64 staddr, uint64 dev, uint64 ino,
 uint64
 sys_linux_fstat(void)
 {
+  // Linux fstat; sockets/pipes get synthetic metadata.
   struct file *f;
   uint64 staddr;
   struct vfs_node node;
@@ -1678,6 +1937,7 @@ sys_linux_fstat(void)
 uint64
 sys_linux_getdents64(void)
 {
+  // Read Linux dirent64 records from the backing VFS directory.
   struct file *f;
   uint64 dirp;
   int nread;
@@ -1695,12 +1955,14 @@ sys_linux_getdents64(void)
 uint64
 sys_linux_mount(void)
 {
+  // Stub: report success for userland that tries harmless mount probes.
   return 0;
 }
 
 uint64
 sys_linux_faccessat(void)
 {
+  // Check whether a path exists; access mode and dirfd are ignored.
   char path[MAXPATH];
   char rpath[MAXPATH];
   struct vfs_path vp;
@@ -1724,6 +1986,7 @@ sys_linux_faccessat(void)
 uint64
 sys_linux_readlinkat(void)
 {
+  // Support /proc/self/exe for glibc dynamic linker origin resolution.
   char path[MAXPATH];
   uint64 buf;
   int size;
@@ -1737,8 +2000,8 @@ sys_linux_readlinkat(void)
   if(size <= 0)
     return -1;
 
-  if(strncmp(path, "/proc/self/exe", 14) == 0)
-    safestrcpy(target, myproc()->name, sizeof(target));
+  if(strlen(path) == 14 && strncmp(path, "/proc/self/exe", 14) == 0)
+    safestrcpy(target, myproc()->linux_exe_path, sizeof(target));
   else
     return -1;
 
@@ -1753,6 +2016,7 @@ sys_linux_readlinkat(void)
 uint64
 sys_mkdir(void)
 {
+  // Create a directory through VFS, with ext4 write redirection.
   char path[MAXPATH];
   char actual[MAXPATH];
   struct vfs_path vp;
@@ -1770,6 +2034,7 @@ sys_mkdir(void)
 uint64
 sys_linux_mkdirat(void)
 {
+  // Linux mkdirat subset; dirfd is ignored.
   char path[MAXPATH], actual[MAXPATH];
   int dirfd, mode;
   struct vfs_path vp;
@@ -1792,6 +2057,7 @@ sys_linux_mkdirat(void)
 uint64
 sys_mknod(void)
 {
+  // Create a device node through VFS.
   char path[MAXPATH], actual[MAXPATH];
   int major, minor;
   struct vfs_path vp;
@@ -1811,6 +2077,7 @@ sys_mknod(void)
 uint64
 sys_linux_mknodat(void)
 {
+  // Linux mknodat subset; dirfd is ignored.
   char path[MAXPATH], actual[MAXPATH];
   int dirfd, major, minor;
   struct vfs_path vp;
@@ -1833,6 +2100,7 @@ sys_linux_mknodat(void)
 uint64
 sys_linux_unlinkat(void)
 {
+  // Linux unlinkat subset; flags and dirfd are ignored.
   char path[MAXPATH], actual[MAXPATH];
   int dirfd, flags;
   struct vfs_path vp;
@@ -1855,6 +2123,7 @@ sys_linux_unlinkat(void)
 uint64
 sys_linux_linkat(void)
 {
+  // Linux linkat subset; dirfds and flags are ignored.
   char new[MAXPATH], old[MAXPATH], actual_old[MAXPATH], actual_new[MAXPATH];
   int olddirfd, newdirfd, flags;
   struct vfs_path oldvp, newvp;
@@ -1882,6 +2151,7 @@ sys_linux_linkat(void)
 uint64
 sys_linux_renameat(void)
 {
+  // Linux renameat subset; dirfds are ignored.
   char old[MAXPATH], new[MAXPATH], actual_old[MAXPATH], actual_new[MAXPATH];
   int olddirfd, newdirfd;
   struct vfs_path oldvp, newvp;
@@ -1906,6 +2176,7 @@ sys_linux_renameat(void)
 uint64
 sys_chdir(void)
 {
+  // Change VFS cwd and synchronize legacy xv6 cwd when possible.
   char path[MAXPATH];
   char rpath[MAXPATH];
   struct vfs_path vp;
@@ -1922,6 +2193,7 @@ sys_chdir(void)
     return -1;
   if(vp.ops->inode->lookup(vp.mount, vp.inner, &node) < 0 ||
      node.type != T_DIR){
+    // Redirected writable directories may exist only under /tmp.
     if(vfs_redirect_proc_path(p, path, rpath, sizeof(rpath)) < 0 ||
        vfs_resolve(rpath, &rvp) < 0 ||
        rvp.ops == 0 || rvp.ops->inode == 0 || rvp.ops->inode->lookup == 0 ||
@@ -1941,6 +2213,7 @@ sys_chdir(void)
 uint64
 sys_linux_getcwd(void)
 {
+  // Return cwd relative to the process root, matching Linux chroot behavior.
   uint64 buf;
   int size;
   struct proc *p = myproc();
@@ -1965,6 +2238,7 @@ sys_linux_getcwd(void)
 uint64
 sys_exec(void)
 {
+  // xv6 exec: copy argv strings from userspace, then replace the image.
   char path[MAXPATH], *argv[MAXARG];
   int i;
   uint64 uargv, uarg;
@@ -1974,6 +2248,7 @@ sys_exec(void)
     return -1;
   }
   memset(argv, 0, sizeof(argv));
+  // Pull the argv vector into kernel pages before kexec destroys old memory.
   for(i=0;; i++){
     if(i >= NELEM(argv)){
       goto bad;
@@ -2008,6 +2283,7 @@ sys_exec(void)
 uint64
 sys_linux_execve(void)
 {
+  // Linux execve: copy argv and run kexec; envp is currently ignored.
   char path[MAXPATH], binpath[MAXPATH], *argv[MAXARG];
   int i;
   uint64 uargv, uarg;
@@ -2017,6 +2293,7 @@ sys_linux_execve(void)
     return -1;
 
   memset(argv, 0, sizeof(argv));
+  // Copy userspace argv into kernel memory before switching page tables.
   for(i = 0;; i++){
     if(i >= NELEM(argv))
       goto bad;
@@ -2067,6 +2344,7 @@ bad:
 uint64
 sys_pipe(void)
 {
+  // Create a pipe and copy the read/write fds back to userspace.
   uint64 fdarray; // user pointer to array of two integers
   struct file *rf, *wf;
   int fd0, fd1;
@@ -2100,5 +2378,6 @@ sys_pipe(void)
 uint64
 sys_linux_pipe2(void)
 {
+  // Linux pipe2 subset; flags are ignored.
   return sys_pipe();
 }

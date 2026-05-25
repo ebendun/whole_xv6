@@ -328,6 +328,7 @@ found:
   p->linux_group_leader = p;
   p->linux_sigcancel_handler = 0;
   p->linux_sigmask = 0;
+  p->linux_exe_path[0] = 0;
   memset(p->vmas, 0, sizeof(p->vmas));
 
   // Allocate a trapframe page.
@@ -415,6 +416,7 @@ freeproc(struct proc *p)
   p->linux_sigmask = 0;
   p->linux_brk = 0;
   p->linux_brk_limit = 0;
+  p->linux_exe_path[0] = 0;
   p->pid = 0;
   p->parent = 0;
   p->name[0] = 0;
@@ -717,11 +719,32 @@ proc_munmap(struct proc *p, uint64 addr, uint64 len)
       return -1;
 
     uint64 vend = v->addr + v->len;
+    uint64 old_addr = v->addr;
+    uint64 old_offset = v->offset;
     uint64 n = len;
     if(addr + n > vend)
       n = vend - addr;
-    if(addr != v->addr && addr + n != vend)
-      return -1;
+    if(addr != v->addr && addr + n != vend){
+      int slot = -1;
+      for(int i = 0; i < NVMA; i++){
+        if(p->vmas[i].used == 0){
+          slot = i;
+          break;
+        }
+      }
+      if(slot < 0)
+        return -1;
+      p->vmas[slot] = *v;
+      p->vmas[slot].addr = addr + n;
+      p->vmas[slot].offset = old_offset + (addr + n - old_addr);
+      p->vmas[slot].len = vend - (addr + n);
+      if(p->vmas[slot].filelen > addr + n - old_addr)
+        p->vmas[slot].filelen -= addr + n - old_addr;
+      else
+        p->vmas[slot].filelen = 0;
+      if(p->vmas[slot].f)
+        filedup(p->vmas[slot].f);
+    }
 
     if(vmawriteback(p, v, addr, n) < 0)
       return -1;
@@ -943,6 +966,7 @@ forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, int share_vm,
   np->linux_sigmask = p->linux_sigmask;
   np->linux_brk = p->linux_brk;
   np->linux_brk_limit = p->linux_brk_limit;
+  safestrcpy(np->linux_exe_path, p->linux_exe_path, sizeof(np->linux_exe_path));
   for(i = 0; i < NVMA; i++){
     np->vmas[i] = p->vmas[i];
     if(np->vmas[i].used && np->vmas[i].f)

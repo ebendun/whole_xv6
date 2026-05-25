@@ -174,6 +174,7 @@ extern uint64 sys_linux_setsockopt(void);
 static uint64
 sys_linux_success(void)
 {
+  // Compatibility stub for Linux calls whose side effects are not modeled.
   return 0;
 }
 
@@ -183,6 +184,7 @@ struct syscall_entry {
 };
 
 static struct syscall_entry linux_syscalls[] = {
+  // Linux ABI syscall table: numbers match RISC-V Linux user binaries.
   {SYS_getcwd, sys_linux_getcwd},
   {SYS_dup, sys_dup},
   {SYS_dup3, sys_linux_dup3},
@@ -269,6 +271,7 @@ static struct syscall_entry linux_syscalls[] = {
 };
 
 static struct syscall_entry xv6_syscalls[] = {
+  // xv6/lab private syscall table: numbers live outside Linux's range.
   {SYS_sbrk, sys_sbrk},
   {SYS_pause, sys_pause},
   {SYS_uptime, sys_uptime},
@@ -286,6 +289,7 @@ static struct syscall_entry xv6_syscalls[] = {
 
 static uint64 (*syscall_lookup(int num))(void)
 {
+  // Prefer Linux ABI numbers, then fall back to xv6 private extensions.
   for(int i = 0; i < NELEM(linux_syscalls); i++){
     if(linux_syscalls[i].num == num)
       return linux_syscalls[i].fn;
@@ -300,6 +304,7 @@ static uint64 (*syscall_lookup(int num))(void)
 void
 syscall(void)
 {
+  // Dispatch the syscall number held in a7 and place the result in a0.
   int num;
   struct proc *p = myproc();
   uint64 (*fn)(void);

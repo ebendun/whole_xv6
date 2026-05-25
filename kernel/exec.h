@@ -14,8 +14,9 @@
 #define AT_GID    13
 #define AT_EGID   14
 #define AT_RANDOM 25
+#define AT_EXECFN 31
 
-#define EXEC_AUXV_LEN 26
+#define EXEC_AUXV_LEN 28
 
 struct script_exec {
   char interp[MAXPATH];
@@ -25,6 +26,7 @@ struct script_exec {
 
 struct exec_state {
   char epath[MAXPATH];
+  char linux_epath[MAXPATH];
   char interp[MAXPATH];
   char interp_epath[MAXPATH];
   uint64 ustack[MAXARG];

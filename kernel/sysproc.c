@@ -24,6 +24,7 @@ futex_init(void)
 void
 linux_futex_wake(uint64 uaddr)
 {
+  // Wake every task sleeping on the same user-space futex word.
   futex_init();
   acquire(&futex_lock);
   for(struct proc *p = proc; p < &proc[NPROC]; p++){
@@ -44,6 +45,7 @@ linux_futex_wake_n_locked(uint64 uaddr, int n)
 
   if(n < 0)
     return 0;
+  // The caller holds futex_lock; walk the process table and wake at most n.
   for(struct proc *p = proc; p < &proc[NPROC]; p++){
     if(count >= n)
       break;
@@ -71,6 +73,7 @@ linux_futex_requeue_locked(uint64 uaddr, int nrwake, uint64 uaddr2,
   if(nrrequeue < 0)
     nrrequeue = 0;
 
+  // Wake the first waiters, then move later waiters to the second futex key.
   for(struct proc *p = proc; p < &proc[NPROC]; p++){
     if(p == myproc())
       continue;
@@ -136,6 +139,7 @@ linux_futex_wake_op(uint64 uaddr, uint64 uaddr2, int nrwake, int nrwake2,
   if(copyin(myproc()->pagetable, (char *)&old, uaddr2, sizeof(old)) < 0)
     return -14; // EFAULT
 
+  // Apply the encoded arithmetic/bit operation to uaddr2.
   switch(op & 7){
   case 0: new = oparg; break;        // FUTEX_OP_SET
   case 1: new = old + oparg; break;  // FUTEX_OP_ADD
@@ -148,6 +152,7 @@ linux_futex_wake_op(uint64 uaddr, uint64 uaddr2, int nrwake, int nrwake2,
   if(copyout(myproc()->pagetable, uaddr2, (char *)&new, sizeof(new)) < 0)
     return -14; // EFAULT
 
+  // Wake uaddr waiters unconditionally; wake uaddr2 waiters only if cmp passes.
   int count = linux_futex_wake_n_locked(uaddr, nrwake);
   if(linux_futex_cmp(old, cmp, cmparg))
     count += linux_futex_wake_n_locked(uaddr2, nrwake2);
@@ -157,6 +162,7 @@ linux_futex_wake_op(uint64 uaddr, uint64 uaddr2, int nrwake, int nrwake2,
 uint64
 sys_exit(void)
 {
+  // Terminate the current process with the supplied status.
   int n;
   argint(0, &n);
   kexit(n);
@@ -166,6 +172,7 @@ sys_exit(void)
 uint64
 sys_getpid(void)
 {
+  // Linux processes report the thread-group id; xv6 processes report pid.
   struct proc *p = myproc();
   if(p->linux_tgid != 0)
     return linux_tgid(p);
@@ -175,12 +182,14 @@ sys_getpid(void)
 uint64
 sys_fork(void)
 {
+  // Create a child process with a copied address space.
   return kfork();
 }
 
 uint64
 sys_linux_clone(void)
 {
+  // Linux clone: create either a process or thread depending on CLONE_* flags.
   uint64 flags, stack, ptid, tls, ctid;
   int pid;
 
@@ -193,6 +202,7 @@ sys_linux_clone(void)
   if((flags & 0x80000) == 0) // CLONE_SETTLS
     tls = 0;
 
+  // Translate the Linux clone flags this kernel understands into kclone args.
   pid = kclone(stack, tls, (flags & 0x200000) ? ctid : 0,
                (flags & 0x100) != 0, (flags & 0x400) != 0,
                (flags & 0x200) != 0, (flags & 0x10000) != 0);
@@ -210,6 +220,7 @@ sys_linux_clone(void)
 uint64
 sys_wait(void)
 {
+  // Wait for one child and optionally copy out its xv6 exit status.
   uint64 p;
   argaddr(0, &p);
   return kwait(p);
@@ -218,6 +229,7 @@ sys_wait(void)
 uint64
 sys_linux_wait4(void)
 {
+  // Linux wait4 compatibility; options/rusage are ignored by kwait_linux().
   uint64 status;
 
   argaddr(1, &status);
@@ -227,6 +239,7 @@ sys_linux_wait4(void)
 uint64
 sys_sbrk(void)
 {
+  // xv6 heap growth; supports eager allocation and lab lazy allocation.
   uint64 addr;
   int t;
   int n;
@@ -254,6 +267,7 @@ sys_sbrk(void)
 uint64
 sys_linux_brk(void)
 {
+  // Linux brk sets the process break and returns the current break on failure.
   uint64 addr;
   struct proc *p = myproc();
 
@@ -278,12 +292,14 @@ sys_linux_brk(void)
 uint64
 sys_linux_gettid(void)
 {
+  // Return the kernel task id, which is Linux's TID.
   return myproc()->pid;
 }
 
 uint64
 sys_linux_getppid(void)
 {
+  // Return parent pid, defaulting to init when no parent is recorded.
   struct proc *p = myproc();
   int pid = 1;
 
@@ -295,6 +311,7 @@ sys_linux_getppid(void)
 uint64
 sys_linux_set_tid_address(void)
 {
+  // Register the userspace address cleared/woken when this task exits.
   uint64 addr;
 
   argaddr(0, &addr);
@@ -305,12 +322,14 @@ sys_linux_set_tid_address(void)
 uint64
 sys_linux_set_robust_list(void)
 {
+  // Stub: pthreads calls this, but robust futex owner-death is not implemented.
   return 0;
 }
 
 uint64
 sys_linux_uname(void)
 {
+  // Fill Linux utsname fields with fixed xv6 compatibility strings.
   uint64 addr;
   char uts[390];
   char *fields[] = {
@@ -334,6 +353,7 @@ sys_linux_uname(void)
 uint64
 sys_linux_getrandom(void)
 {
+  // Stub entropy source: return zero bytes so libc startup can continue.
   uint64 buf;
   int len;
   char zeros[64];
@@ -358,6 +378,7 @@ sys_linux_getrandom(void)
 uint64
 sys_linux_gettimeofday(void)
 {
+  // Convert xv6 ticks to a Linux timeval {sec, usec}.
   uint64 addr;
   uint64 tv[2];
 
@@ -374,6 +395,7 @@ sys_linux_gettimeofday(void)
 uint64
 sys_linux_clock_gettime(void)
 {
+  // Convert xv6 ticks to a Linux timespec {sec, nsec}; clock id is ignored.
   uint64 addr;
   uint64 ts[2];
 
@@ -390,6 +412,7 @@ sys_linux_clock_gettime(void)
 uint64
 sys_linux_syslog(void)
 {
+  // Minimal klog interface used by some utilities: expose a tiny fixed buffer.
   int type, len;
   uint64 buf;
   char msg[] = "xv6\n";
@@ -414,6 +437,7 @@ sys_linux_syslog(void)
 uint64
 sys_linux_sysinfo(void)
 {
+  // Return a mostly fake sysinfo struct with uptime and total RAM filled in.
   uint64 info;
   char si[112];
   long uptime_sec;
@@ -436,6 +460,7 @@ sys_linux_sysinfo(void)
 uint64
 sys_linux_ioctl(void)
 {
+  // Minimal ioctl handling: return zeroed structs for common terminal/RTC probes.
   uint64 request;
   uint64 argp;
   char zeros[64];
@@ -458,12 +483,14 @@ sys_linux_ioctl(void)
 uint64
 sys_linux_rt_sigtimedwait(void)
 {
+  // Stub for test runners that poll for SIGCHLD.
   return 17; // SIGCHLD; enough for the libc-test runner's child wait path.
 }
 
 uint64
 sys_linux_rt_sigaction(void)
 {
+  // Record glibc's internal cancellation signal handler when installed.
   int sig;
   uint64 act, handler;
 
@@ -480,6 +507,7 @@ sys_linux_rt_sigaction(void)
 uint64
 sys_linux_rt_sigprocmask(void)
 {
+  // Maintain a per-process Linux signal mask; only 64-bit masks are supported.
   int how;
   uint64 set, oldset;
   uint64 mask = 0;
@@ -520,12 +548,14 @@ sys_linux_rt_sigprocmask(void)
 uint64
 sys_linux_rt_sigreturn(void)
 {
+  // Restore the trapframe saved by linux_deliver_signal().
   return linux_sigreturn();
 }
 
 uint64
 sys_linux_prlimit64(void)
 {
+  // Return large fixed resource limits; setting new limits is ignored.
   uint64 new_limit, old_limit;
   uint64 lim[2];
 
@@ -545,12 +575,14 @@ sys_linux_prlimit64(void)
 uint64
 sys_linux_setsid(void)
 {
+  // Stub session creation: report this process as the new session leader.
   return myproc()->pid;
 }
 
 uint64
 sys_linux_futex(void)
 {
+  // Linux futex subset used by glibc/pthreads: wait, wake, requeue, wake-op.
   uint64 uaddr;
   uint64 uaddr2;
   int op, val, cur;
@@ -568,6 +600,7 @@ sys_linux_futex(void)
   switch(op){
   case 0:  // FUTEX_WAIT
   case 9:  // FUTEX_WAIT_BITSET
+    // Verify the futex value before sleeping to avoid lost wakeups.
     if(myproc()->trapframe->a3 != 0){
       uint64 ts[2];
       uint deadline, timeout;
@@ -624,6 +657,7 @@ sys_linux_futex(void)
     return 0;
   case 1:  // FUTEX_WAKE
   case 10: // FUTEX_WAKE_BITSET
+    // Wake up to val waiters on this futex address.
     return linux_futex_wake_n(uaddr, val);
   case 3:  // FUTEX_REQUEUE
   {
@@ -635,6 +669,7 @@ sys_linux_futex(void)
     return count;
   }
   case 4:  // FUTEX_CMP_REQUEUE
+    // Requeue only if the futex word still matches val3.
     if(copyin(myproc()->pagetable, (char *)&cur, uaddr, sizeof(cur)) < 0)
       return -14; // EFAULT
     if(cur != val3)
@@ -658,6 +693,7 @@ sys_linux_futex(void)
 uint64
 sys_linux_tgkill(void)
 {
+  // Send a Linux-style signal to a specific tid within a thread group.
   int tgid, tid, sig;
 
   argint(0, &tgid);
@@ -674,6 +710,7 @@ sys_linux_tgkill(void)
 uint64
 sys_linux_tkill(void)
 {
+  // Send a Linux-style signal to a specific tid.
   int tid, sig;
 
   argint(0, &tid);
@@ -685,6 +722,7 @@ sys_linux_tkill(void)
 uint64
 sys_linux_times(void)
 {
+  // Return elapsed ticks and zero CPU accounting fields.
   uint64 addr;
   uint64 tms[4] = {0, 0, 0, 0};
   uint64 now;
@@ -701,6 +739,7 @@ sys_linux_times(void)
 uint64
 sys_linux_sched_yield(void)
 {
+  // Yield the CPU voluntarily.
   yield();
   return 0;
 }
@@ -708,6 +747,7 @@ sys_linux_sched_yield(void)
 uint64
 sys_linux_nanosleep(void)
 {
+  // Sleep for a Linux timespec duration, rounded up to xv6 ticks.
   uint64 addr;
   uint64 ts[2];
   uint target, start;
@@ -735,6 +775,7 @@ sys_linux_nanosleep(void)
 uint64
 sys_linux_exit_group(void)
 {
+  // Terminate every task in the Linux thread group.
   int n;
   argint(0, &n);
   kexit_group(n);
@@ -744,6 +785,7 @@ sys_linux_exit_group(void)
 uint64
 sys_pause(void)
 {
+  // xv6 sleep for n clock ticks.
   int n;
   uint ticks0;
   argint(0, &n);
@@ -767,6 +809,7 @@ sys_pause(void)
 int
 sys_pgpte(void)
 {
+  // Debug syscall: return the PTE for a user virtual address.
   uint64 va;
   struct proc *p;  
 
@@ -781,6 +824,7 @@ sys_pgpte(void)
 int
 sys_kpgtbl(void)
 {
+  // Debug syscall: print this process's page table.
   struct proc *p;  
 
   p = myproc();
@@ -792,6 +836,7 @@ sys_kpgtbl(void)
 uint64
 sys_sigalarm(void)
 {
+  // Install the xv6 alarm handler called every interval ticks.
   int ticks;
   uint64 handler;
   struct proc *p = myproc();
@@ -810,6 +855,7 @@ sys_sigalarm(void)
 uint64
 sys_sigreturn(void)
 {
+  // Finish an xv6 alarm handler and restore the interrupted trapframe.
   struct proc *p = myproc();
   uint64 saved_a0 = p->alarm_trapframe.a0;
 
@@ -821,6 +867,7 @@ sys_sigreturn(void)
 uint64
 sys_kill(void)
 {
+  // Mark a process killed by pid.
   int pid;
 
   argint(0, &pid);
@@ -832,6 +879,7 @@ sys_kill(void)
 uint64
 sys_uptime(void)
 {
+  // Return global clock ticks since boot.
   uint xticks;
 
   read_acquire(&tickslock);
@@ -843,6 +891,7 @@ sys_uptime(void)
 uint64
 sys_interpose(void)
 {
+  // Configure syscall interposition mask and optional allowed path.
   int mask;
   struct proc *p = myproc();
 
@@ -861,6 +910,7 @@ sys_interpose(void)
 uint64
 sys_cpupin(void)
 {
+  // Pin the current process to a specific CPU for scheduling tests.
   struct proc *p = myproc();
   int cpu;
 

@@ -17,7 +17,9 @@ static int loadseg_file(pde_t *, uint64, struct file *, uint, uint);
 static int load_elf_load_segments(pagetable_t, struct file *, struct elfhdr *,
                                   struct proghdr *, uint64, uint64 *,
                                   uint64 *);
-static void build_auxv(uint64 *, uint64, struct elfhdr *, uint64, uint64);
+static void build_auxv(uint64 *, uint64, struct elfhdr *, uint64, uint64,
+                       uint64);
+static void exec_linux_visible_path(struct vfs_path *, char *, int);
 extern struct proc proc[NPROC];
 
 // Resolve a process-relative path through VFS and open it as a regular file.
@@ -141,6 +143,10 @@ kexec(char *path, char **argv)
   safestrcpy(st->epath, st->vp.type == VFS_EXT4 ? st->vp.inner : st->vp.abs_path,
              sizeof(st->epath));
   is_ext4 = st->vp.type == VFS_EXT4;
+  if(is_ext4)
+    exec_linux_visible_path(&st->vp, st->linux_epath, sizeof(st->linux_epath));
+  else
+    st->linux_epath[0] = 0;
 
   // acquire the ELF header.
   if(vfs_file_read_kernel(ef, (char *)&st->elf, sizeof(st->elf), 0) != sizeof(st->elf))
@@ -240,15 +246,26 @@ kexec(char *path, char **argv)
   st->ustack[argc] = 0;
 
   {
-    uint64 rand_addr, argv_addr, envp_addr, auxv_addr;
+    uint64 rand_addr, execfn_addr, argv_addr, envp_addr, auxv_addr;
     uint64 random[2] = {0, 0};
     int auxbytes = sizeof(st->auxv);
     int total;
 
+    execfn_addr = 0;
+    if(is_ext4){
+      sp -= strlen(st->linux_epath) + 1;
+      sp -= sp % 16;
+      execfn_addr = sp;
+      if(sp < stackbase ||
+         copyout(pagetable, execfn_addr, st->linux_epath,
+                 strlen(st->linux_epath) + 1) < 0)
+        goto bad;
+    }
+
     sp -= sizeof(random);
     sp -= sp % 16;
     rand_addr = sp;
-    build_auxv(st->auxv, phdr_addr, &st->elf, at_base, rand_addr);
+    build_auxv(st->auxv, phdr_addr, &st->elf, at_base, rand_addr, execfn_addr);
     if(sp < stackbase || copyout(pagetable, rand_addr, (char *)random, sizeof(random)) < 0)
       goto bad;
 
@@ -312,10 +329,12 @@ kexec(char *path, char **argv)
     vfs_set_proc_root(p, "/ext4");
     p->vfs_redirect = 1;
     safestrcpy(p->vfs_redirect_root, "/tmp", sizeof(p->vfs_redirect_root));
+    safestrcpy(p->linux_exe_path, st->linux_epath, sizeof(p->linux_exe_path));
   } else {
     vfs_set_proc_root(p, "/");
     p->vfs_redirect = 0;
     p->vfs_redirect_root[0] = 0;
+    p->linux_exe_path[0] = 0;
   }
   p->mmap_base = USIGRETURN;
   p->trapframe->epc = entry;  // initial program counter
@@ -377,7 +396,7 @@ load_elf_load_segments(pagetable_t pagetable, struct file *f,
 // xv6 programs ignore most of it, but ext4/Linux binaries need these entries.
 static void
 build_auxv(uint64 *auxv, uint64 phdr_addr, struct elfhdr *elf, uint64 at_base,
-           uint64 rand_addr)
+           uint64 rand_addr, uint64 execfn_addr)
 {
   auxv[0] = AT_PHDR;   auxv[1] = phdr_addr;
   auxv[2] = AT_PHENT;  auxv[3] = sizeof(struct proghdr);
@@ -391,7 +410,32 @@ build_auxv(uint64 *auxv, uint64 phdr_addr, struct elfhdr *elf, uint64 at_base,
   auxv[18] = AT_GID;   auxv[19] = 0;
   auxv[20] = AT_EGID;  auxv[21] = 0;
   auxv[22] = AT_RANDOM; auxv[23] = rand_addr;
-  auxv[24] = AT_NULL;  auxv[25] = 0;
+  auxv[24] = AT_EXECFN; auxv[25] = execfn_addr;
+  auxv[26] = AT_NULL;  auxv[27] = 0;
+}
+
+static void
+exec_linux_visible_path(struct vfs_path *vp, char *out, int outsz)
+{
+  char *path;
+  int n;
+
+  if(outsz <= 0)
+    return;
+  out[0] = 0;
+  if(vp == 0)
+    return;
+
+  path = vp->abs_path;
+  n = strlen("/ext4");
+  if(strncmp(path, "/ext4", n) == 0 && (path[n] == 0 || path[n] == '/')){
+    if(path[n] == 0)
+      safestrcpy(out, "/", outsz);
+    else
+      safestrcpy(out, path + n, outsz);
+  } else {
+    safestrcpy(out, path, outsz);
+  }
 }
 
 // Load an ELF program segment into pagetable at virtual address va.

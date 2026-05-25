@@ -140,6 +140,7 @@ struct proc {
   uint64 linux_sigmask;        // Linux blocked signal mask
   uint64 linux_brk;            // Current Linux ABI program break
   uint64 linux_brk_limit;      // Highest Linux brk before the stack guard
+  char linux_exe_path[MAXPATH]; // Absolute Linux-visible executable path
   pagetable_t pagetable;       // User page table
   struct trapframe *trapframe; // data page for trampoline.S
   struct usyscall *usyscall;   // shared user/kernel page
