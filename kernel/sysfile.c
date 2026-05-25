@@ -2034,6 +2034,9 @@ sys_linux_execve(void)
   }
 
   int ret = kexec(path, argv);
+
+  //This is not very graceful, but in this way we can
+  //support the linux similar behavior of executing the binary file
   if(ret < 0 && path[0] != '/' && strlen(path) + 6 < sizeof(binpath)){
     int has_slash = 0;
     for(char *s = path; *s; s++){
@@ -2042,6 +2045,7 @@ sys_linux_execve(void)
         break;
       }
     }
+    //the binary should be placed in /bin/
     if(has_slash == 0){
       safestrcpy(binpath, "/bin/", sizeof(binpath));
       safestrcpy(binpath + 5, path, sizeof(binpath) - 5);

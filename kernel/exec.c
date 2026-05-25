@@ -11,24 +11,17 @@
 #include "defs.h"
 #include "elf.h"
 #include "vfs.h"
-
-#define AT_NULL   0
-#define AT_PHDR   3
-#define AT_PHENT  4
-#define AT_PHNUM  5
-#define AT_PAGESZ 6
-#define AT_BASE   7
-#define AT_FLAGS  8
-#define AT_ENTRY  9
-#define AT_UID    11
-#define AT_EUID   12
-#define AT_GID    13
-#define AT_EGID   14
-#define AT_RANDOM 25
+#include "exec.h"
 
 static int loadseg_file(pde_t *, uint64, struct file *, uint, uint);
+static int load_elf_load_segments(pagetable_t, struct file *, struct elfhdr *,
+                                  struct proghdr *, uint64, uint64 *,
+                                  uint64 *);
+static void build_auxv(uint64 *, uint64, struct elfhdr *, uint64, uint64);
 extern struct proc proc[NPROC];
 
+// Resolve a process-relative path through VFS and open it as a regular file.
+// On success, vp records the resolved VFS location and *fp is the opened file.
 static int
 exec_open_vfs(char *path, struct vfs_path *vp, struct file **fp)
 {
@@ -46,6 +39,8 @@ exec_open_vfs(char *path, struct vfs_path *vp, struct file **fp)
   return vp->ops->file->open(vp->mount, vp->inner, 0, fp);
 }
 
+// Open the dynamic linker named by PT_INTERP.  Linux binaries from ext4 may
+// name /lib/..., which we redirect into the mounted glibc or musl trees.
 static int
 exec_open_interp(char *path, int from_ext4, struct vfs_path *vp, struct file **fp)
 {
@@ -68,93 +63,28 @@ exec_open_interp(char *path, int from_ext4, struct vfs_path *vp, struct file **f
   return exec_open_vfs(path, vp, fp);
 }
 
+// Non-ELF files are treated as shell scripts handled by busybox sh.
+// This keeps script handling in user space instead of teaching the kernel
+// about every possible shebang interpreter.
 static int
-exec_vfs_file_exists(char *path)
+exec_nonelf(char *script, char **argv)
 {
-  struct vfs_path vp;
-  struct file *f;
-
-  if(exec_open_vfs(path, &vp, &f) < 0)
-    return 0;
-  fileclose(f);
-  return 1;
-}
-
-static int
-exec_script(char *script, char *hdr, char **argv)
-{
-  struct script_exec {
-    char interp[MAXPATH];
-    char iarg[MAXPATH];
-    char resolved[MAXPATH];
-    char *nargv[MAXARG];
-  } *se;
-  int i = 2;
-  int j = 0;
+  struct script_exec *se;
+  int i;
   int n = 0;
   int ret;
-  int has_shebang = hdr[0] == '#' && hdr[1] == '!';
+  struct proc *p = myproc();
 
   se = (struct script_exec *)kalloc();
   if(se == 0)
     return -1;
   memset(se, 0, sizeof(*se));
 
-  if(has_shebang){
-    while(hdr[i] == ' ' || hdr[i] == '\t')
-      i++;
-    while(hdr[i] && hdr[i] != '\n' && hdr[i] != '\r' &&
-          hdr[i] != ' ' && hdr[i] != '\t' && j < sizeof(se->interp) - 1)
-      se->interp[j++] = hdr[i++];
-    se->interp[j] = 0;
-    if(se->interp[0] == 0){
-      kfree(se);
-      return -1;
-    }
-
-    while(hdr[i] == ' ' || hdr[i] == '\t')
-      i++;
-    j = 0;
-    while(hdr[i] && hdr[i] != '\n' && hdr[i] != '\r' &&
-          hdr[i] != ' ' && hdr[i] != '\t' && j < sizeof(se->iarg) - 1)
-      se->iarg[j++] = hdr[i++];
-    se->iarg[j] = 0;
-  } else {
-    safestrcpy(se->interp, "/bin/sh", sizeof(se->interp));
-    safestrcpy(se->iarg, "sh", sizeof(se->iarg));
-  }
-
-  if((strncmp(se->interp, "/bin/sh", 7) == 0 && se->interp[7] == 0) ||
-     (strncmp(se->interp, "/bin/busybox", 12) == 0 && se->interp[12] == 0) ||
-     (strncmp(se->interp, "/busybox", 8) == 0 && se->interp[8] == 0)){
-    struct proc *p = myproc();
-    if(p->vfs_cwd.mount && p->vfs_cwd.mount->type == VFS_EXT4){
-      char *slash;
-      safestrcpy(se->resolved, p->vfs_cwd.inner, sizeof(se->resolved));
-      for(;;){
-        if(p->vfs_root.mount && p->vfs_root.mount->type == VFS_EXT4)
-          snprintf(se->interp, sizeof(se->interp), "%s/busybox", se->resolved);
-        else
-          snprintf(se->interp, sizeof(se->interp), "/ext4%s/busybox", se->resolved);
-        if(exec_vfs_file_exists(se->interp))
-          break;
-        slash = 0;
-        for(char *q = se->resolved; *q; q++)
-          if(*q == '/')
-            slash = q;
-        if(slash == 0 || slash == se->resolved){
-          if(p->vfs_root.mount && p->vfs_root.mount->type == VFS_EXT4)
-            safestrcpy(se->interp, "/musl/busybox", sizeof(se->interp));
-          else
-            safestrcpy(se->interp, "/ext4/musl/busybox", sizeof(se->interp));
-          break;
-        }
-        *slash = 0;
-      }
-    }
-    if(se->iarg[0] == 0)
-      safestrcpy(se->iarg, "sh", sizeof(se->iarg));
-  }
+  if(p->vfs_root.mount && p->vfs_root.mount->type == VFS_EXT4)
+    safestrcpy(se->interp, "/musl/busybox", sizeof(se->interp));
+  else
+    safestrcpy(se->interp, "/ext4/musl/busybox", sizeof(se->interp));
+  safestrcpy(se->iarg, "sh", sizeof(se->iarg));
 
   se->nargv[n++] = se->interp;
   if(se->iarg[0])
@@ -169,7 +99,7 @@ exec_script(char *script, char *hdr, char **argv)
   return ret;
 }
 
-// map ELF permissions to PTE permission bits.
+// Map ELF segment permissions to the small subset of PTE bits we use here.
 int flags2perm(int flags)
 {
     int perm = 0;
@@ -180,23 +110,12 @@ int flags2perm(int flags)
     return perm;
 }
 
-//
-// the implementation of the exec() system call
-//
+// Replace the current process image with path.  Most work happens in a fresh
+// pagetable first; the old image is discarded only after every load step works.
 int
 kexec(char *path, char **argv)
 {
-  struct exec_state {
-    char epath[MAXPATH];
-    char interp[MAXPATH];
-    char interp_epath[MAXPATH];
-    uint64 ustack[MAXARG];
-    struct elfhdr elf;
-    struct elfhdr ielf;
-    struct proghdr ph;
-    struct vfs_path vp;
-    uint64 auxv[26];
-  } *st;
+  struct exec_state *st;
   char *s, *last;
   int i, off;
   int is_ext4 = 0;
@@ -223,18 +142,15 @@ kexec(char *path, char **argv)
              sizeof(st->epath));
   is_ext4 = st->vp.type == VFS_EXT4;
 
-  // Read the ELF header.
+  // acquire the ELF header.
   if(vfs_file_read_kernel(ef, (char *)&st->elf, sizeof(st->elf), 0) != sizeof(st->elf))
     goto bad;
 
   // Is this really an ELF file?
   if(st->elf.magic != ELF_MAGIC){
-    char hdr[128];
-    memset(hdr, 0, sizeof(hdr));
-    vfs_file_read_kernel(ef, hdr, sizeof(hdr) - 1, 0);
     fileclose(ef);
     ef = 0;
-    ret = exec_script(path, hdr, argv);
+    ret = exec_nonelf(path, argv);
     kfree(st);
     return ret;
   }
@@ -242,7 +158,7 @@ kexec(char *path, char **argv)
   if((pagetable = proc_pagetable(p)) == 0)
     goto bad;
 
-  // Load program into memory.
+  // Load program into memory and find an optional Linux interpreter.
   for(i=0, off=st->elf.phoff; i<st->elf.phnum; i++, off+=sizeof(st->ph)){
     if(vfs_file_read_kernel(ef, (char *)&st->ph, sizeof(st->ph), off) != sizeof(st->ph))
       goto bad;
@@ -254,21 +170,10 @@ kexec(char *path, char **argv)
       st->interp[st->ph.filesz - 1] = 0;
       has_interp = 1;
     }
-    if(st->ph.type != ELF_PROG_LOAD)
-      continue;
-    if(st->elf.phoff >= st->ph.off && st->elf.phoff < st->ph.off + st->ph.filesz)
-      phdr_addr = st->ph.vaddr + (st->elf.phoff - st->ph.off);
-    if(st->ph.memsz < st->ph.filesz)
-      goto bad;
-    if(st->ph.vaddr + st->ph.memsz < st->ph.vaddr)
-      goto bad;
-    uint64 sz1;
-    if((sz1 = uvmalloc(pagetable, sz, st->ph.vaddr + st->ph.memsz, flags2perm(st->ph.flags))) == 0)
-      goto bad;
-    sz = sz1;
-    if(loadseg_file(pagetable, st->ph.vaddr, ef, st->ph.off, st->ph.filesz) < 0)
-      goto bad;
   }
+  if(load_elf_load_segments(pagetable, ef, &st->elf, &st->ph, 0, &sz,
+                            &phdr_addr) < 0)
+    goto bad;
   fileclose(ef);
   ef = 0;
 
@@ -276,7 +181,7 @@ kexec(char *path, char **argv)
   app_brk = PGROUNDUP(sz);
 
   if(has_interp){
-    uint64 base, sz1;
+    uint64 base;
 
     if(exec_open_interp(st->interp, is_ext4, &st->vp, &interp_f) < 0)
       goto bad;
@@ -289,21 +194,9 @@ kexec(char *path, char **argv)
 
     base = PGROUNDUP(sz) + 16 * PGSIZE;
     at_base = base;
-    for(i = 0, off = st->ielf.phoff; i < st->ielf.phnum; i++, off += sizeof(st->ph)){
-      if(vfs_file_read_kernel(interp_f, (char *)&st->ph, sizeof(st->ph), off) != sizeof(st->ph))
-        goto bad;
-      if(st->ph.type != ELF_PROG_LOAD)
-        continue;
-      if(st->ph.memsz < st->ph.filesz)
-        goto bad;
-      if(base + st->ph.vaddr + st->ph.memsz < base + st->ph.vaddr)
-        goto bad;
-      if((sz1 = uvmalloc(pagetable, sz, base + st->ph.vaddr + st->ph.memsz, flags2perm(st->ph.flags))) == 0)
-        goto bad;
-      sz = sz1;
-      if(loadseg_file(pagetable, base + st->ph.vaddr, interp_f, st->ph.off, st->ph.filesz) < 0)
-        goto bad;
-    }
+    if(load_elf_load_segments(pagetable, interp_f, &st->ielf, &st->ph, base,
+                              &sz, 0) < 0)
+      goto bad;
     fileclose(interp_f);
     interp_f = 0;
     entry = base + st->ielf.entry;
@@ -352,24 +245,10 @@ kexec(char *path, char **argv)
     int auxbytes = sizeof(st->auxv);
     int total;
 
-    st->auxv[0] = AT_PHDR;   st->auxv[1] = phdr_addr;
-    st->auxv[2] = AT_PHENT;  st->auxv[3] = sizeof(struct proghdr);
-    st->auxv[4] = AT_PHNUM;  st->auxv[5] = st->elf.phnum;
-    st->auxv[6] = AT_PAGESZ; st->auxv[7] = PGSIZE;
-    st->auxv[8] = AT_BASE;   st->auxv[9] = at_base;
-    st->auxv[10] = AT_FLAGS; st->auxv[11] = 0;
-    st->auxv[12] = AT_ENTRY; st->auxv[13] = st->elf.entry;
-    st->auxv[14] = AT_UID;   st->auxv[15] = 0;
-    st->auxv[16] = AT_EUID;  st->auxv[17] = 0;
-    st->auxv[18] = AT_GID;   st->auxv[19] = 0;
-    st->auxv[20] = AT_EGID;  st->auxv[21] = 0;
-    st->auxv[22] = AT_RANDOM;
-    st->auxv[24] = AT_NULL;  st->auxv[25] = 0;
-
     sp -= sizeof(random);
     sp -= sp % 16;
     rand_addr = sp;
-    st->auxv[23] = rand_addr;
+    build_auxv(st->auxv, phdr_addr, &st->elf, at_base, rand_addr);
     if(sp < stackbase || copyout(pagetable, rand_addr, (char *)random, sizeof(random)) < 0)
       goto bad;
 
@@ -459,6 +338,60 @@ kexec(char *path, char **argv)
     fileclose(interp_f);
   kfree(st);
   return -1;
+}
+
+// Load every PT_LOAD segment from an ELF file.  base is zero for the main
+// program and nonzero when placing a dynamic linker above the program image.
+static int
+load_elf_load_segments(pagetable_t pagetable, struct file *f,
+                       struct elfhdr *elf, struct proghdr *ph, uint64 base,
+                       uint64 *sz, uint64 *phdr_addr)
+{
+  int i, off;
+
+  for(i = 0, off = elf->phoff; i < elf->phnum; i++, off += sizeof(*ph)){
+    if(vfs_file_read_kernel(f, (char *)ph, sizeof(*ph), off) != sizeof(*ph))
+      return -1;
+    if(ph->type != ELF_PROG_LOAD)
+      continue;
+    if(phdr_addr && elf->phoff >= ph->off && elf->phoff < ph->off + ph->filesz)
+      *phdr_addr = base + ph->vaddr + (elf->phoff - ph->off);
+    if(ph->memsz < ph->filesz)
+      return -1;
+    if(base + ph->vaddr + ph->memsz < base + ph->vaddr)
+      return -1;
+
+    uint64 sz1;
+    if((sz1 = uvmalloc(pagetable, *sz, base + ph->vaddr + ph->memsz,
+                       flags2perm(ph->flags))) == 0)
+      return -1;
+    *sz = sz1;
+    if(loadseg_file(pagetable, base + ph->vaddr, f, ph->off, ph->filesz) < 0)
+      return -1;
+  }
+
+  return 0;
+}
+
+// Build the auxiliary vector expected by Linux-style startup code and rtld.
+// xv6 programs ignore most of it, but ext4/Linux binaries need these entries.
+static void
+build_auxv(uint64 *auxv, uint64 phdr_addr, struct elfhdr *elf, uint64 at_base,
+           uint64 rand_addr)
+{
+  auxv[0] = AT_PHDR;   auxv[1] = phdr_addr;
+  auxv[2] = AT_PHENT;  auxv[3] = sizeof(struct proghdr);
+  auxv[4] = AT_PHNUM;  auxv[5] = elf->phnum;
+  auxv[6] = AT_PAGESZ; auxv[7] = PGSIZE;
+  auxv[8] = AT_BASE;   auxv[9] = at_base;
+  auxv[10] = AT_FLAGS; auxv[11] = 0;
+  auxv[12] = AT_ENTRY; auxv[13] = elf->entry;
+  auxv[14] = AT_UID;   auxv[15] = 0;
+  auxv[16] = AT_EUID;  auxv[17] = 0;
+  auxv[18] = AT_GID;   auxv[19] = 0;
+  auxv[20] = AT_EGID;  auxv[21] = 0;
+  auxv[22] = AT_RANDOM; auxv[23] = rand_addr;
+  auxv[24] = AT_NULL;  auxv[25] = 0;
 }
 
 // Load an ELF program segment into pagetable at virtual address va.
