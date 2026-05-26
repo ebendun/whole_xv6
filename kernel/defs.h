@@ -147,7 +147,6 @@ int             vfs_set_proc_cwd(struct proc*, char*);
 int             vfs_proc_cwd_path(struct proc*, char*, int);
 int             vfs_resolve(char*, struct vfs_path*);
 int             vfs_resolve_proc_path(struct proc*, char*, struct vfs_path*);
-int             vfs_redirect_proc_path(struct proc*, char*, char*, int);
 int             vfs_file_stat_node(struct file*, struct vfs_node*);
 int             vfs_file_read_kernel(struct file*, char*, int, uint64);
 int             vfs_file_write_kernel(struct file*, char*, int, uint64);
@@ -182,7 +181,9 @@ void*           memset(void*, int, uint);
 char*           safestrcpy(char*, const char*, int);
 int             strlen(const char*);
 int             strncmp(const char*, const char*, uint);
+int             strcmp(const char*, const char*);
 char*           strncpy(char*, const char*, int);
+char*           strcpy(char*, const char*);
 
 // syscall.c
 void            argint(int, int*);
@@ -247,20 +248,6 @@ void            virtio_disk_rw(struct buf *, int);
 void            virtio_disk_intr(void);
 
 
-// ext4 probe/init
-void            ext4_init(void);
-int             ext4_read_super(int dev);
-void            ext4_list_root(int dev);
-int             ext4_read_file_by_path(int dev, const char *path, uchar *dst, uint32 len);
-int             ext4_read_file_by_path_at(int dev, const char *path, uchar *dst, uint32 len, uint32 off);
-uint64          ext4_file_size_by_path(int dev, const char *path);
-int             ext4_path_is_dir(int dev, const char *path);
-int             ext4_path_is_reg(int dev, const char *path);
-int             ext4_stat_by_path(int dev, const char *path, uint64 *mode, uint64 *size, uint64 *ino);
-int             ext4_dirent_by_path(int dev, const char *path, uint64 off, uint64 *next,
-                                    uint64 *ino, uchar *type, char *name, int namesz);
-void            ext4_print_sh_scripts(int dev);
-void            ext4_join_path(char *out, int outsz, char *cwd, char *path);
 // number of elements in fixed-size array
 #define NELEM(x) (sizeof(x)/sizeof((x)[0]))
 

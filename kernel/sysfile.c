@@ -31,9 +31,6 @@ static void linux_apply_times(uint64 *atime_sec, uint64 *atime_nsec,
                               uint64 *mtime_sec, uint64 *mtime_nsec,
                               int have_ts, uint64 *ts, uint64 now_sec,
                               uint64 now_nsec);
-static int xv6_ensure_parent_dirs(char *path);
-static int vfs_open_path(char *path, int omode, struct file **fp);
-static int vfs_stat_path(char *path, struct vfs_node *node);
 static int vfs_prepare_write_path(struct proc *p, char *path, char *actual,
                                   int actualsz, struct vfs_path *vp);
 static int vfs_sync_legacy_cwd(struct proc *p, struct vfs_path *vp);
@@ -1054,7 +1051,7 @@ sys_link(void)
 uint64
 sys_unlink(void)
 {
-  // Remove a filesystem entry, redirecting ext4 writes into writable xv6 space.
+  // Remove a filesystem entry through the process's real VFS root/cwd.
   char path[MAXPATH], actual[MAXPATH];
   struct vfs_path vp;
   struct proc *p = myproc();
@@ -1069,82 +1066,13 @@ sys_unlink(void)
 }
 
 static int
-xv6_ensure_parent_dirs(char *path)
-{
-  // Create each missing parent directory for redirected ext4 write paths.
-  char cur[MAXPATH];
-  int len;
-
-  if(path == 0 || path[0] != '/')
-    return -1;
-
-  len = strlen(path);
-  for(int i = 1; i < len; i++){
-    struct vfs_path vp;
-
-    if(path[i] != '/')
-      continue;
-    if(i + 1 >= len)
-      break;
-
-    memmove(cur, path, i);
-    cur[i] = 0;
-
-    if(vfs_resolve(cur, &vp) < 0 ||
-       vp.ops == 0 || vp.ops->inode == 0 || vp.ops->inode->mkdir == 0 ||
-       vp.ops->inode->mkdir(vp.mount, vp.inner, 0) < 0)
-      return -1;
-  }
-
-  return 0;
-}
-
-static int
-vfs_open_path(char *path, int omode, struct file **fp)
-{
-  // Resolve an absolute VFS path and dispatch to that filesystem's open op.
-  struct vfs_path vp;
-
-  if(path == 0 || fp == 0)
-    return -1;
-  if(vfs_resolve(path, &vp) < 0 ||
-     vp.ops == 0 || vp.ops->file == 0 || vp.ops->file->open == 0)
-    return -1;
-  return vp.ops->file->open(vp.mount, vp.inner, omode, fp);
-}
-
-static int
-vfs_stat_path(char *path, struct vfs_node *node)
-{
-  // Resolve an absolute VFS path and fetch its generic node metadata.
-  struct vfs_path vp;
-
-  if(path == 0 || node == 0)
-    return -1;
-  if(vfs_resolve(path, &vp) < 0 ||
-     vp.ops == 0 || vp.ops->inode == 0 || vp.ops->inode->lookup == 0)
-    return -1;
-  return vp.ops->inode->lookup(vp.mount, vp.inner, node);
-}
-
-static int
 linux_stat_proc_path(struct proc *p, char *path, struct vfs_path *vp,
                      struct vfs_node *node, char *actual, int actualsz)
 {
-  char rpath[MAXPATH];
   struct vfs_path tmp;
 
   if(p == 0 || path == 0 || node == 0)
     return -2; // ENOENT
-
-  if(vfs_redirect_proc_path(p, path, rpath, sizeof(rpath)) == 0 &&
-     vfs_stat_path(rpath, node) == 0){
-    if(vp)
-      vfs_resolve(rpath, vp);
-    if(actual && actualsz > 0)
-      safestrcpy(actual, rpath, actualsz);
-    return 0;
-  }
 
   if(vp == 0){
     vp = &tmp;
@@ -1197,18 +1125,11 @@ static int
 vfs_prepare_write_path(struct proc *p, char *path, char *actual, int actualsz,
                        struct vfs_path *vp)
 {
-  // Linux ext4 root is read-only; relative writes are redirected under /tmp.
-  char rpath[MAXPATH];
+  // Ext4 is writable now; write paths should resolve to the process's real
+  // root/cwd instead of the old xv6 /tmp redirect layer.
 
   if(p == 0 || path == 0 || actual == 0 || actualsz <= 0 || vp == 0)
     return -1;
-
-  if(vfs_redirect_proc_path(p, path, rpath, sizeof(rpath)) == 0){
-    if(xv6_ensure_parent_dirs(rpath) < 0)
-      return -1;
-    safestrcpy(actual, rpath, actualsz);
-    return vfs_resolve(actual, vp);
-  }
 
   safestrcpy(actual, path, actualsz);
   return vfs_resolve_proc_path(p, path, vp);
@@ -1269,9 +1190,8 @@ linux_sync_fs_to_group(struct proc *src, struct vfs_path *vp)
 uint64
 sys_open(void)
 {
-  // Open or create a file through VFS, honoring redirected ext4 writes.
+  // Open or create a file through VFS.
   char path[MAXPATH];
-  char rpath[MAXPATH];
   char actual[MAXPATH];
   int fd, omode;
   struct file *f;
@@ -1285,15 +1205,6 @@ sys_open(void)
     return -1;
 
   if((omode & O_CREATE) == 0){
-    // Reads prefer redirected writable copies, then fall back to original path.
-    if(vfs_redirect_proc_path(p, path, rpath, sizeof(rpath)) == 0 &&
-       vfs_open_path(rpath, omode, &f) == 0){
-      if((fd = fdalloc(f)) < 0){
-        fileclose(f);
-        return -24; // EMFILE
-      }
-      return fd;
-    }
     if(vfs_resolve_proc_path(p, path, &vp) == 0 &&
        vp.ops && vp.ops->file && vp.ops->file->open &&
        vp.ops->file->open(vp.mount, vp.inner, omode, &f) == 0){
@@ -1368,7 +1279,6 @@ sys_linux_openat(void)
   // Linux openat subset with directory-fd relative path handling.
   char path[MAXPATH];
   char opath[MAXPATH];
-  char rpath[MAXPATH];
   char actual[MAXPATH];
   int fd, dirfd, flags, omode;
   uint64 mode;
@@ -1395,15 +1305,6 @@ sys_linux_openat(void)
     return -24; // EMFILE
   omode = linux_open_flags(flags);
   if((omode & O_CREATE) == 0){
-    // Prefer redirected copies for relative paths under the Linux ext4 root.
-    if(vfs_redirect_proc_path(p, opath, rpath, sizeof(rpath)) == 0 &&
-       vfs_open_path(rpath, omode, &f) == 0){
-      if((fd = fdalloc(f)) < 0){
-        fileclose(f);
-        return -24; // EMFILE
-      }
-      return fd;
-    }
     if(vfs_resolve_proc_path(p, opath, &vp) == 0 &&
        vp.ops && vp.ops->file && vp.ops->file->open &&
        vp.ops->file->open(vp.mount, vp.inner, omode, &f) == 0){
@@ -1678,7 +1579,7 @@ sys_linux_ppoll(void)
 uint64
 sys_linux_newfstatat(void)
 {
-  // Linux stat by path, checking redirected copy before original VFS path.
+  // Linux stat by path through the process's real VFS root/cwd.
   char path[MAXPATH];
   char actual[MAXPATH];
   uint64 staddr;
@@ -1964,17 +1865,12 @@ sys_linux_faccessat(void)
 {
   // Check whether a path exists; access mode and dirfd are ignored.
   char path[MAXPATH];
-  char rpath[MAXPATH];
   struct vfs_path vp;
   struct vfs_node node;
   struct proc *p = myproc();
 
   if(argstr(1, path, MAXPATH) < 0)
     return -1;
-
-  if(vfs_redirect_proc_path(p, path, rpath, sizeof(rpath)) == 0 &&
-     vfs_stat_path(rpath, &node) == 0)
-    return 0;
 
   if(vfs_resolve_proc_path(p, path, &vp) == 0 &&
      vp.ops && vp.ops->inode && vp.ops->inode->lookup &&
@@ -2178,9 +2074,7 @@ sys_chdir(void)
 {
   // Change VFS cwd and synchronize legacy xv6 cwd when possible.
   char path[MAXPATH];
-  char rpath[MAXPATH];
   struct vfs_path vp;
-  struct vfs_path rvp;
   struct vfs_node node;
   struct proc *p = myproc();
   
@@ -2192,15 +2086,8 @@ sys_chdir(void)
   if(vp.ops == 0 || vp.ops->inode == 0 || vp.ops->inode->lookup == 0)
     return -1;
   if(vp.ops->inode->lookup(vp.mount, vp.inner, &node) < 0 ||
-     node.type != T_DIR){
-    // Redirected writable directories may exist only under /tmp.
-    if(vfs_redirect_proc_path(p, path, rpath, sizeof(rpath)) < 0 ||
-       vfs_resolve(rpath, &rvp) < 0 ||
-       rvp.ops == 0 || rvp.ops->inode == 0 || rvp.ops->inode->lookup == 0 ||
-       rvp.ops->inode->lookup(rvp.mount, rvp.inner, &node) < 0 ||
-       node.type != T_DIR)
-      return -1;
-  }
+     node.type != T_DIR)
+    return -1;
 
   if(vfs_set_proc_cwd(p, vp.abs_path) < 0)
     return -1;

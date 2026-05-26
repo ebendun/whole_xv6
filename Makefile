@@ -35,11 +35,36 @@ OBJS = \
   $K/kernelvec.o \
   $K/plic.o \
   $K/virtio_disk.o\
-  $K/ext4.o \
-  $K/ext4_probe.o \
   $K/virtio_net.o \
   $K/net.o \
   $K/sprintf.o\
+
+LWEXT4_OBJS = \
+  $K/lwext4/src/ext4.o \
+  $K/lwext4/src/ext4_balloc.o \
+  $K/lwext4/src/ext4_bcache.o \
+  $K/lwext4/src/ext4_bitmap.o \
+  $K/lwext4/src/ext4_block_group.o \
+  $K/lwext4/src/ext4_blockdev.o \
+  $K/lwext4/src/ext4_crc32.o \
+  $K/lwext4/src/ext4_debug.o \
+  $K/lwext4/src/ext4_dir.o \
+  $K/lwext4/src/ext4_dir_idx.o \
+  $K/lwext4/src/ext4_extent.o \
+  $K/lwext4/src/ext4_fs.o \
+  $K/lwext4/src/ext4_hash.o \
+  $K/lwext4/src/ext4_ialloc.o \
+  $K/lwext4/src/ext4_inode.o \
+  $K/lwext4/src/ext4_journal.o \
+  $K/lwext4/src/ext4_mbr.o \
+  $K/lwext4/src/ext4_mkfs.o \
+  $K/lwext4/src/ext4_super.o \
+  $K/lwext4/src/ext4_trans.o \
+  $K/lwext4/src/ext4_xattr.o \
+  $K/lwext4_stubs.o \
+  $K/lwext4_port.o
+
+OBJS += $(LWEXT4_OBJS)
 
 OBJS_KCSAN = \
   $K/start.o \
@@ -111,6 +136,18 @@ CFLAGS += -fno-builtin-free
 CFLAGS += -fno-builtin-memcpy -Wno-main
 CFLAGS += -fno-builtin-printf -fno-builtin-fprintf -fno-builtin-vprintf
 CFLAGS += -I.
+CFLAGS += -Ikernel/lwext4/include
+CFLAGS += -DCONFIG_USE_DEFAULT_CFG=1
+CFLAGS += -DCONFIG_USE_USER_MALLOC=1
+CFLAGS += -DCONFIG_HAVE_OWN_ERRNO=1
+CFLAGS += -DCONFIG_HAVE_OWN_OFLAGS=1
+CFLAGS += -DCONFIG_DEBUG_PRINTF=0
+CFLAGS += -DCONFIG_DEBUG_ASSERT=0
+CFLAGS += -DCONFIG_JOURNALING_ENABLE=0
+CFLAGS += -DCONFIG_XATTR_ENABLE=0
+CFLAGS += -DCONFIG_EXT4_MAX_MP_NAME=4
+CFLAGS += -DCONFIG_EXT4_MOUNTPOINTS_COUNT=1
+CFLAGS += -DCONFIG_BLOCK_DEV_CACHE_SIZE=16
 CFLAGS += $(shell $(CC) -fno-stack-protector -E -x c /dev/null >/dev/null 2>&1 && echo -fno-stack-protector)
 CFLAGS += -DNET_TESTS_PORT=$(SERVERPORT)
 
@@ -142,6 +179,9 @@ $(OBJS): EXTRAFLAG := $(KCSANFLAG)
 
 $K/%.o: $K/%.c
 	$(CC) $(CFLAGS) $(EXTRAFLAG) -c -o $@ $<
+
+$K/lwext4/src/%.o: $K/lwext4/src/%.c
+	$(CC) $(CFLAGS) $(EXTRAFLAG) -Wno-error -Wno-format -Wno-unused-function -c -o $@ $<
 
 $K/%.o: $K/%.S
 	$(CC) -g -c -o $@ $<

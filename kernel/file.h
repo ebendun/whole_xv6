@@ -1,5 +1,4 @@
 #include "param.h"
-#include "ext4.h"
 
 #define SOCKET_QUEUE 8
 #define SOCKET_PAYLOAD 512
@@ -35,6 +34,7 @@ struct file {
   struct pipe *pipe; // FD_PIPE
   struct inode *ip;  // FD_INODE and FD_DEVICE
   uint64 off;        // FD_INODE / FD_EXT4
+  void *fs_file;     // filesystem-private open file state
   char ext4_path[MAXPATH]; // FD_EXT4
   short major;       // FD_DEVICE
   int sock_domain;

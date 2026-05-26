@@ -327,13 +327,9 @@ kexec(char *path, char **argv)
   p->is_linux = is_ext4;
   if(is_ext4){
     vfs_set_proc_root(p, "/ext4");
-    p->vfs_redirect = 1;
-    safestrcpy(p->vfs_redirect_root, "/tmp", sizeof(p->vfs_redirect_root));
     safestrcpy(p->linux_exe_path, st->linux_epath, sizeof(p->linux_exe_path));
   } else {
     vfs_set_proc_root(p, "/");
-    p->vfs_redirect = 0;
-    p->vfs_redirect_root[0] = 0;
     p->linux_exe_path[0] = 0;
   }
   p->mmap_base = USIGRETURN;

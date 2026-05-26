@@ -81,6 +81,8 @@ fileclose(struct file *f)
     begin_op();
     iput(ff.ip);
     end_op();
+  } else if(ff.vfs_ops && ff.vfs_ops->file && ff.vfs_ops->file->close){
+    ff.vfs_ops->file->close(&ff);
   }
 }
 

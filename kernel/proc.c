@@ -307,8 +307,6 @@ found:
   p->vfs_cwd.mount = vfs_root_mount();
   safestrcpy(p->vfs_cwd.inner, "/", sizeof(p->vfs_cwd.inner));
   safestrcpy(p->vfs_cwd.abs_path, "/", sizeof(p->vfs_cwd.abs_path));
-  p->vfs_redirect = 0;
-  p->vfs_redirect_root[0] = 0;
   p->mmap_base = USIGRETURN;
   p->is_linux = 0;
   p->linux_brk = 0;
@@ -432,8 +430,6 @@ freeproc(struct proc *p)
   p->vfs_cwd.mount = 0;
   p->vfs_cwd.inner[0] = 0;
   p->vfs_cwd.abs_path[0] = 0;
-  p->vfs_redirect = 0;
-  p->vfs_redirect_root[0] = 0;
   
   p->alarm_interval = 0;
   p->alarm_ticks = 0;
@@ -953,8 +949,6 @@ forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, int share_vm,
   np->vfs_cwd.mount = p->vfs_cwd.mount;
   safestrcpy(np->vfs_cwd.inner, p->vfs_cwd.inner, sizeof(np->vfs_cwd.inner));
   safestrcpy(np->vfs_cwd.abs_path, p->vfs_cwd.abs_path, sizeof(np->vfs_cwd.abs_path));
-  np->vfs_redirect = p->vfs_redirect;
-  safestrcpy(np->vfs_redirect_root, p->vfs_redirect_root, sizeof(np->vfs_redirect_root));
   np->interpose_mask = p->interpose_mask;
   safestrcpy(np->interpose_path, p->interpose_path, sizeof(np->interpose_path));
   np->mmap_base = p->mmap_base;
@@ -1376,10 +1370,6 @@ forkret(void)
     // regular process (e.g., because it calls sleep), and thus cannot
     // be run from main().
     fsinit(SECONDDEV);
-
-    // Probe ext4 on FIRSTDEV here — must run in process context
-    // because `bread()` will sleep.
-    ext4_init();
 
     first = 0;
     // ensure other cores see first=0.

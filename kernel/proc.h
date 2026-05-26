@@ -155,8 +155,6 @@ struct proc {
   struct inode *cwd;           // Current directory
   struct proc_vfs_cwd vfs_root;// Process root in VFS terms
   struct proc_vfs_cwd vfs_cwd; // Current directory in VFS terms
-  int vfs_redirect;            // Redirect writes from read-only ext4 fs to writable root
-  char vfs_redirect_root[MAXPATH];
   char name[16];               // Process name (debugging)
   int interpose_mask;          // Bit mask of blocked syscalls
   char interpose_path[MAXPATH];// Allowed path for masked open/exec
