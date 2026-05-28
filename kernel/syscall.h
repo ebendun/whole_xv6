@@ -38,6 +38,7 @@
 #define SYS_get_robust_list 100
 #define SYS_nanosleep 101
 #define SYS_clock_gettime 113
+#define SYS_clock_nanosleep 115
 #define SYS_syslog    116
 #define SYS_sched_yield 124
 #define SYS_rt_sigreturn 139
@@ -82,6 +83,7 @@
 #define SYS_prlimit64 261
 #define SYS_renameat2 276
 #define SYS_getrandom 278
+#define SYS_rseq      283
 
 // xv6/lab private extensions live outside the Linux syscall range.
 #define SYS_sbrk       1000

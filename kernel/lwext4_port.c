@@ -25,7 +25,10 @@
 #include <ext4_blockdev.h>
 #include <ext4_bcache.h>
 #include <ext4_errno.h>
+#include <ext4_fs.h>
+#include <ext4_inode.h>
 #include <ext4_oflags.h>
+#include <ext4_types.h>
 
 #define LWEXT4_MOUNTPOINT "/"
 #define LWEXT4_VFS_PREFIX "/ext4"
@@ -50,8 +53,8 @@ static struct ext4_blockdev_iface lwext4_iface;
 static struct ext4_blockdev lwext4_bdev;
 static struct lwext4_alloc lwext4_allocs[LWEXT4_ALLOCS];
 
-static int lwext4_stat_full_locked(const char *full, uint64 *mode,
-                                   uint64 *size, uint64 *ino, int *type);
+static int lwext4_stat_full_locked(const char *full,
+                                   struct lwext4_xv6_stat *st);
 
 static int
 lwext4_map_open_flags(int xv6_flags)
@@ -317,54 +320,73 @@ lwext4_xv6_init(int dev)
 }
 
 int
-lwext4_xv6_stat_by_path(int dev, const char *path, uint64 *mode,
-                        uint64 *size, uint64 *ino, int *type)
+lwext4_xv6_stat(int dev, const char *path, struct lwext4_xv6_stat *st)
 {
   char full[MAXPATH];
   int r;
 
+  if(st == 0)
+    return -1;
   if(lwext4_xv6_init(dev) < 0)
     return -1;
   if(lwext4_clean_path(full, sizeof(full), path) < 0)
     return -1;
 
   acquiresleep(&lwext4_fs_lock);
-  r = lwext4_stat_full_locked(full, mode, size, ino, type);
+  r = lwext4_stat_full_locked(full, st);
   releasesleep(&lwext4_fs_lock);
   return r;
 }
 
-static int
-lwext4_stat_full_locked(const char *full, uint64 *mode, uint64 *size,
-                        uint64 *ino, int *type)
+int
+lwext4_xv6_stat_by_path(int dev, const char *path, uint64 *mode,
+                        uint64 *size, uint64 *ino, int *type)
 {
-  ext4_file f;
-  int r;
+  struct lwext4_xv6_stat st;
 
-  memset(&f, 0, sizeof(f));
-  r = ext4_fopen2(&f, full, O_RDONLY);
-  if(r == EOK){
-    if(mode) *mode = 0100000 | 0777;
-    if(size) *size = ext4_fsize(&f);
-    if(ino) *ino = f.inode;
-    if(type) *type = T_FILE;
-    ext4_fclose(&f);
-    return 0;
-  }
+  if(lwext4_xv6_stat(dev, path, &st) < 0)
+    return -1;
+  if(mode) *mode = st.mode;
+  if(size) *size = st.size;
+  if(ino) *ino = st.ino;
+  if(type) *type = st.type;
+  return 0;
+}
 
-  ext4_dir d;
-  memset(&d, 0, sizeof(d));
-  r = ext4_dir_open(&d, full);
-  if(r == EOK){
-    if(mode) *mode = 0040000 | 0777;
-    if(size) *size = 0;
-    if(ino) *ino = d.f.inode;
-    if(type) *type = T_DIR;
-    ext4_dir_close(&d);
-    return 0;
-  }
+static int
+lwext4_stat_full_locked(const char *full, struct lwext4_xv6_stat *st)
+{
+  struct ext4_inode_ref ref;
+  struct ext4_mountpoint *mp;
+  uint32 mode;
+  uint32 kind;
 
-  return -1;
+  memset(st, 0, sizeof(*st));
+  mp = ext4_get_inode_ref(full, &ref);
+  if(mp == 0)
+    return -1;
+
+  mode = ext4_inode_get_mode(&ref.fs->sb, ref.inode);
+  kind = mode & EXT4_INODE_MODE_TYPE_MASK;
+  st->mode = mode;
+  st->size = ext4_inode_get_size(&ref.fs->sb, ref.inode);
+  st->ino = ref.index;
+  st->nlink = ext4_inode_get_links_cnt(ref.inode);
+  st->blocks = ext4_inode_get_blocks_count(&ref.fs->sb, ref.inode);
+  st->uid = ext4_inode_get_uid(ref.inode);
+  st->gid = ext4_inode_get_gid(ref.inode);
+  st->atime = ext4_inode_get_access_time(ref.inode);
+  st->mtime = ext4_inode_get_modif_time(ref.inode);
+  st->ctime = ext4_inode_get_change_inode_time(ref.inode);
+  if(kind == EXT4_INODE_MODE_DIRECTORY)
+    st->type = T_DIR;
+  else if(kind == EXT4_INODE_MODE_FILE || kind == EXT4_INODE_MODE_SOFTLINK)
+    st->type = T_FILE;
+  else
+    st->type = T_DEVICE;
+
+  ext4_put_inode_ref(mp, &ref);
+  return 0;
 }
 
 int
@@ -440,9 +462,8 @@ lwext4_xv6_open(int dev, const char *path, int xv6_flags, void **handle,
 {
   char full[MAXPATH];
   ext4_file *f;
-  ext4_dir d;
+  ext4_dir *d;
   int r;
-  int ret = -1;
 
   if(handle == 0)
     return -1;
@@ -468,17 +489,24 @@ lwext4_xv6_open(int dev, const char *path, int xv6_flags, void **handle,
   }
   ext4_user_free(f);
 
-  memset(&d, 0, sizeof(d));
-  if((xv6_flags & 3) == 0 && ext4_dir_open(&d, full) == EOK){
+  d = ext4_user_malloc(sizeof(*d));
+  if(d == 0){
+    releasesleep(&lwext4_fs_lock);
+    return -1;
+  }
+  memset(d, 0, sizeof(*d));
+  if((xv6_flags & 3) == 0 && ext4_dir_open(d, full) == EOK){
+    *handle = d;
     if(type) *type = T_DIR;
     if(size) *size = 0;
-    if(ino) *ino = d.f.inode;
-    ext4_dir_close(&d);
-    ret = 0;
+    if(ino) *ino = d->f.inode;
+    releasesleep(&lwext4_fs_lock);
+    return 0;
   }
+  ext4_user_free(d);
 
   releasesleep(&lwext4_fs_lock);
-  return ret;
+  return -1;
 }
 
 int
@@ -497,6 +525,64 @@ lwext4_xv6_close(void *handle)
   releasesleep(&lwext4_fs_lock);
   ext4_user_free(f);
   return 0;
+}
+
+int
+lwext4_xv6_close_dir(void *handle)
+{
+  ext4_dir *d = (ext4_dir*)handle;
+
+  if(d == 0)
+    return 0;
+  acquiresleep(&lwext4_fs_lock);
+  if(ext4_dir_close(d) != EOK){
+    releasesleep(&lwext4_fs_lock);
+    ext4_user_free(d);
+    return -1;
+  }
+  releasesleep(&lwext4_fs_lock);
+  ext4_user_free(d);
+  return 0;
+}
+
+int
+lwext4_xv6_dirent_next(void *handle, uint64 *next, uint64 *ino, uchar *type,
+                       char *name, int namesz)
+{
+  ext4_dir *d = (ext4_dir*)handle;
+  const ext4_direntry *de;
+
+  if(d == 0 || namesz <= 0)
+    return -1;
+
+  acquiresleep(&lwext4_fs_lock);
+  for(;;){
+    de = ext4_dir_entry_next(d);
+    if(de == 0){
+      releasesleep(&lwext4_fs_lock);
+      return 0;
+    }
+    if(de->inode == 0)
+      continue;
+    if(de->name_length == 1 && de->name[0] == '.')
+      continue;
+    if(de->name_length == 2 && de->name[0] == '.' && de->name[1] == '.')
+      continue;
+
+    int n = de->name_length;
+    if(n >= namesz)
+      n = namesz - 1;
+    memmove(name, de->name, n);
+    name[n] = 0;
+    if(next)
+      *next = d->next_off == (uint64)-1 ? d->next_off : d->next_off + 1;
+    if(ino)
+      *ino = de->inode;
+    if(type)
+      *type = de->inode_type;
+    releasesleep(&lwext4_fs_lock);
+    return 1;
+  }
 }
 
 int
@@ -602,18 +688,18 @@ int
 lwext4_xv6_unlink(int dev, const char *path)
 {
   char full[MAXPATH];
-  int type = 0;
+  struct lwext4_xv6_stat st;
 
   if(lwext4_xv6_init(dev) < 0)
     return -1;
   if(lwext4_clean_path(full, sizeof(full), path) < 0)
     return -1;
   acquiresleep(&lwext4_fs_lock);
-  if(lwext4_stat_full_locked(full, 0, 0, 0, &type) < 0){
+  if(lwext4_stat_full_locked(full, &st) < 0){
     releasesleep(&lwext4_fs_lock);
     return -1;
   }
-  if(type == T_DIR){
+  if(st.type == T_DIR){
     if(ext4_dir_rm(full) != EOK){
       releasesleep(&lwext4_fs_lock);
       return -1;

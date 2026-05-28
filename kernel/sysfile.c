@@ -21,6 +21,8 @@
 
 static int linux_copy_stat_time(uint64 staddr, uint64 dev, uint64 ino,
                                 uint64 mode, uint64 nlink, uint64 size,
+                                uint64 blocks, uint uid, uint gid,
+                                uint64 atime, uint64 mtime, uint64 ctime,
                                 char *path, struct file *tf);
 static int linux_openat_resolve(struct proc *p, int dirfd, char *path,
                                 char *out, int outsz);
@@ -57,7 +59,6 @@ struct linux_utime_entry {
 static struct spinlock linux_utime_lock;
 static int linux_utime_lock_inited;
 static struct linux_utime_entry linux_utimes[LINUX_UTIME_SLOTS];
-static struct linux_utime_entry linux_last_utime;
 
 static void
 linux_socket_lock_init(void)
@@ -80,11 +81,7 @@ linux_utime_lock_init(void)
 static void
 linux_now_timespec(uint64 *sec, uint64 *nsec)
 {
-  // Convert xv6 ticks to a Linux-style timespec.
-  acquire(&tickslock.l);
-  *sec = ticks / 10;
-  *nsec = (ticks % 10) * 100000000;
-  release(&tickslock.l);
+  linux_wall_timespec(sec, nsec);
 }
 
 static struct linux_utime_entry *
@@ -158,8 +155,11 @@ fdalloc(struct file *f)
 {
   int fd;
   struct proc *p = myproc();
+  uint64 limit = linux_nofile_limit();
 
   for(fd = 0; fd < NOFILE; fd++){
+    if((uint64)fd >= limit)
+      break;
     if(p->ofile[fd] == 0){
       p->ofile[fd] = f;
       linux_sync_file_table(p);
@@ -1004,11 +1004,17 @@ sys_linux_mprotect(void)
 
   if(p->linux_share_vm){
     for(struct proc *q = proc; q < &proc[NPROC]; q++){
-      if(q == p || q->state == UNUSED || q->pagetable == 0)
+      if(q == p)
         continue;
+      acquire(&q->lock);
+      if(q->state == UNUSED || q->state == ZOMBIE || q->pagetable == 0){
+        release(&q->lock);
+        continue;
+      }
       if(linux_tgid(q) == linux_tgid(p) &&
          linux_mprotect_one(q, start, end, prot) < 0)
         linux_mprotect_mapped_pages(q, start, end, prot);
+      release(&q->lock);
     }
   }
   return 0;
@@ -1240,6 +1246,8 @@ linux_open_flags(int flags)
     omode |= O_CREATE;
   if(flags & 0x200)  // O_TRUNC
     omode |= O_TRUNC;
+  if(flags & 0x400)  // O_APPEND
+    omode |= O_APPEND;
   return omode;
 }
 
@@ -1295,7 +1303,7 @@ sys_linux_openat(void)
   if(linux_openat_resolve(p, dirfd, path, opath, sizeof(opath)) < 0)
     return -9; // EBADF
   int has_fd = 0;
-  for(int i = 0; i < NOFILE; i++){
+  for(int i = 0; i < NOFILE && (uint64)i < linux_nofile_limit(); i++){
     if(p->ofile[i] == 0){
       has_fd = 1;
       break;
@@ -1613,8 +1621,9 @@ sys_linux_newfstatat(void)
       else
         mode = 0100000 | 0777;
     }
-    return linux_copy_stat_time(staddr, FIRSTDEV, node.ino, mode, 1,
-                                node.size, 0, f);
+    return linux_copy_stat_time(staddr, FIRSTDEV, node.ino, mode, node.nlink,
+                                node.size, node.blocks, node.uid, node.gid,
+                                node.atime, node.mtime, node.ctime, 0, f);
   }
   (void)dirfd;
 
@@ -1630,8 +1639,9 @@ sys_linux_newfstatat(void)
     else
       mode = 0100000 | 0777;
   }
-  return linux_copy_stat_time(staddr, FIRSTDEV, node.ino, mode, 1, node.size,
-                              actual, 0);
+  return linux_copy_stat_time(staddr, FIRSTDEV, node.ino, mode, node.nlink,
+                              node.size, node.blocks, node.uid, node.gid,
+                              node.atime, node.mtime, node.ctime, actual, 0);
 }
 
 uint64
@@ -1668,8 +1678,25 @@ sys_linux_utimensat(void)
       return -14; // EFAULT
     if(path[0] == 0)
       return -2; // ENOENT
-    if(linux_stat_proc_path(p, path, 0, &node, actual, sizeof(actual)) < 0)
+    if(linux_stat_proc_path(p, path, 0, &node, actual, sizeof(actual)) < 0){
+      char prefix[MAXPATH];
+      char *slash = 0;
+      for(char *s = path; *s; s++){
+        if(*s == '/')
+          slash = s;
+      }
+      if(slash && slash != path){
+        int n = slash - path;
+        if(n >= sizeof(prefix))
+          n = sizeof(prefix) - 1;
+        memmove(prefix, path, n);
+        prefix[n] = 0;
+        if(linux_stat_proc_path(p, prefix, 0, &node, actual, sizeof(actual)) == 0 &&
+           node.type != T_DIR)
+          return -20; // ENOTDIR
+      }
       return -2; // ENOENT
+    }
   }
 
   linux_now_timespec(&now_sec, &now_nsec);
@@ -1702,25 +1729,9 @@ sys_linux_utimensat(void)
         e->atime_nsec = f->atime_nsec;
         e->mtime_sec = f->mtime_sec;
         e->mtime_nsec = f->mtime_nsec;
-        linux_last_utime = *e;
-      } else {
-        memset(&linux_last_utime, 0, sizeof(linux_last_utime));
-        linux_last_utime.used = 1;
-        linux_last_utime.atime_sec = f->atime_sec;
-        linux_last_utime.atime_nsec = f->atime_nsec;
-        linux_last_utime.mtime_sec = f->mtime_sec;
-        linux_last_utime.mtime_nsec = f->mtime_nsec;
       }
       release(&linux_utime_lock);
     }
-    linux_utime_lock_init();
-    acquire(&linux_utime_lock);
-    linux_last_utime.used = 1;
-    linux_last_utime.atime_sec = f->atime_sec;
-    linux_last_utime.atime_nsec = f->atime_nsec;
-    linux_last_utime.mtime_sec = f->mtime_sec;
-    linux_last_utime.mtime_nsec = f->mtime_nsec;
-    release(&linux_utime_lock);
     return 0;
   }
 
@@ -1735,27 +1746,35 @@ sys_linux_utimensat(void)
 
   linux_apply_times(&e->atime_sec, &e->atime_nsec, &e->mtime_sec,
                     &e->mtime_nsec, have_ts, ts, now_sec, now_nsec);
-  linux_last_utime = *e;
   release(&linux_utime_lock);
   return 0;
 }
 
 static int
 linux_copy_stat_time(uint64 staddr, uint64 dev, uint64 ino,
-                     uint64 mode, uint64 nlink, uint64 size, char *path,
-                     struct file *tf)
+                     uint64 mode, uint64 nlink, uint64 size, uint64 blocks,
+                     uint uid, uint gid, uint64 atime, uint64 mtime,
+                     uint64 ctime, char *path, struct file *tf)
 {
   // Build the riscv64 Linux stat layout used by glibc.
   char st[128];
   uint mode32 = mode;
   uint nlink32 = nlink;
-  uint uid32 = 0;
-  uint gid32 = 0;
-  uint64 atime_sec = 0, atime_nsec = 0;
-  uint64 mtime_sec = 0, mtime_nsec = 0;
-  uint64 ctime_sec = 0, ctime_nsec = 0;
+  uint uid32 = uid;
+  uint gid32 = gid;
+  uint64 atime_sec = atime, atime_nsec = 0;
+  uint64 mtime_sec = mtime, mtime_nsec = 0;
+  uint64 ctime_sec = ctime, ctime_nsec = 0;
+  uint64 blksize = BSIZE;
 
   memset(st, 0, sizeof(st));
+  if(atime_sec == 0 && mtime_sec == 0 && ctime_sec == 0){
+    linux_wall_timespec(&mtime_sec, &mtime_nsec);
+    atime_sec = mtime_sec;
+    atime_nsec = mtime_nsec;
+    ctime_sec = mtime_sec;
+    ctime_nsec = mtime_nsec;
+  }
   if(tf && tf->has_time){
     // Prefer timestamps stored on the open file.
     atime_sec = tf->atime_sec;
@@ -1769,8 +1788,6 @@ linux_copy_stat_time(uint64 staddr, uint64 dev, uint64 ino,
     linux_utime_lock_init();
     acquire(&linux_utime_lock);
     struct linux_utime_entry *e = linux_utime_find(path, 0);
-    if(e == 0 && linux_last_utime.used)
-      e = &linux_last_utime;
     if(e){
       atime_sec = e->atime_sec;
       atime_nsec = e->atime_nsec;
@@ -1788,6 +1805,8 @@ linux_copy_stat_time(uint64 staddr, uint64 dev, uint64 ino,
   memmove(st + 24, &uid32, sizeof(uid32)); // st_uid
   memmove(st + 28, &gid32, sizeof(gid32)); // st_gid
   memmove(st + 48, &size, sizeof(size)); // st_size
+  memmove(st + 56, &blksize, sizeof(blksize)); // st_blksize
+  memmove(st + 64, &blocks, sizeof(blocks)); // st_blocks
   memmove(st + 72, &atime_sec, sizeof(atime_sec));
   memmove(st + 80, &atime_nsec, sizeof(atime_nsec));
   memmove(st + 88, &mtime_sec, sizeof(mtime_sec));
@@ -1808,6 +1827,14 @@ sys_linux_fstat(void)
   struct vfs_node node;
   uint64 mode = 0100000 | 0777;
   uint64 size = 0;
+  uint64 ino = 0;
+  uint64 nlink = 1;
+  uint64 blocks = 0;
+  uint uid = 0;
+  uint gid = 0;
+  uint64 atime = 0;
+  uint64 mtime = 0;
+  uint64 ctime = 0;
   struct proc *p = myproc();
 
   argaddr(1, &staddr);
@@ -1828,11 +1855,20 @@ sys_linux_fstat(void)
         mode = 0100000 | 0777;
     }
     size = node.size;
+    ino = node.ino;
+    nlink = node.nlink;
+    blocks = node.blocks;
+    uid = node.uid;
+    gid = node.gid;
+    atime = node.atime;
+    mtime = node.mtime;
+    ctime = node.ctime;
   } else {
     mode = 0010000 | 0777;
   }
 
-  return linux_copy_stat_time(staddr, FIRSTDEV, 0, mode, 1, size, 0, f);
+  return linux_copy_stat_time(staddr, FIRSTDEV, ino, mode, nlink, size,
+                              blocks, uid, gid, atime, mtime, ctime, 0, f);
 }
 
 uint64

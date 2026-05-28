@@ -35,6 +35,7 @@ struct file {
   struct inode *ip;  // FD_INODE and FD_DEVICE
   uint64 off;        // FD_INODE / FD_EXT4
   void *fs_file;     // filesystem-private open file state
+  int fs_is_dir;     // FD_EXT4 directory handle
   char ext4_path[MAXPATH]; // FD_EXT4
   short major;       // FD_DEVICE
   int sock_domain;

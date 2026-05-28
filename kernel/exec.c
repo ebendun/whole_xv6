@@ -58,6 +58,11 @@ exec_open_interp(char *path, int from_ext4, struct vfs_path *vp, struct file **f
       snprintf(full, sizeof(full), rooted_ext4 ? "/musl%s" : "/ext4/musl%s", path);
       if(exec_open_vfs(full, vp, fp) == 0)
         return 0;
+      if(strncmp(path, "/lib/ld-musl-", 13) == 0){
+        snprintf(full, sizeof(full), rooted_ext4 ? "/musl/lib/libc.so" : "/ext4/musl/lib/libc.so");
+        if(exec_open_vfs(full, vp, fp) == 0)
+          return 0;
+      }
     }
     snprintf(full, sizeof(full), rooted_ext4 ? "%s" : "/ext4%s", path);
     return exec_open_vfs(full, vp, fp);
@@ -325,6 +330,23 @@ kexec(char *path, char **argv)
   p->pagetable = pagetable;
   p->sz = sz;
   p->is_linux = is_ext4;
+  p->linux_signal_pending = 0;
+  p->linux_pending_signal = 0;
+  p->linux_pending_sender = 0;
+  p->linux_in_signal = 0;
+  p->linux_share_vm = 0;
+  p->linux_share_files = 0;
+  p->linux_share_fs = 0;
+  p->linux_is_thread = 0;
+  p->linux_tgid = p->pid;
+  p->linux_group_leader = p;
+  p->linux_group_exiting = 0;
+  p->linux_group_xstate = 0;
+  p->linux_thread_count = 1;
+  p->linux_sigcancel_handler = 0;
+  p->linux_sigmask = 0;
+  p->clear_child_tid = 0;
+  p->pincpu = is_ext4 ? &cpus[0] : 0;
   if(is_ext4){
     vfs_set_proc_root(p, "/ext4");
     safestrcpy(p->linux_exe_path, st->linux_epath, sizeof(p->linux_exe_path));

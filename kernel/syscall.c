@@ -147,6 +147,7 @@ extern uint64 sys_linux_clock_gettime(void);
 extern uint64 sys_linux_times(void);
 extern uint64 sys_linux_sched_yield(void);
 extern uint64 sys_linux_nanosleep(void);
+extern uint64 sys_linux_clock_nanosleep(void);
 extern uint64 sys_linux_syslog(void);
 extern uint64 sys_linux_sysinfo(void);
 extern uint64 sys_linux_ioctl(void);
@@ -223,6 +224,7 @@ static struct syscall_entry linux_syscalls[] = {
   {SYS_get_robust_list, sys_linux_success},
   {SYS_nanosleep, sys_linux_nanosleep},
   {SYS_clock_gettime, sys_linux_clock_gettime},
+  {SYS_clock_nanosleep, sys_linux_clock_nanosleep},
   {SYS_syslog, sys_linux_syslog},
   {SYS_sched_yield, sys_linux_sched_yield},
   {SYS_kill, sys_kill},
@@ -268,6 +270,7 @@ static struct syscall_entry linux_syscalls[] = {
   {SYS_statfs, sys_linux_statfs},
   {SYS_renameat2, sys_linux_renameat},
   {SYS_getrandom, sys_linux_getrandom},
+  {SYS_rseq, sys_linux_success},
 };
 
 static struct syscall_entry xv6_syscalls[] = {

@@ -125,6 +125,7 @@ void            scheduler(void) __attribute__((noreturn));
 void            sched(void);
 void            sleep(void*, struct spinlock*);
 int             futex_timed_sleep(void*, struct spinlock*, uint);
+void            futex_set_bitset(uint);
 void            futex_tick(uint);
 void            userinit(void);
 int             kwait(uint64);
@@ -199,6 +200,8 @@ void            trapinit(void);
 void            trapinithart(void);
 extern struct rwspinlock tickslock;
 void            prepare_return(void);
+void            linux_wall_timespec(uint64*, uint64*);
+uint64          linux_nofile_limit(void);
 
 // start.c
 void            timerinit(void);

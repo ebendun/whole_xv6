@@ -227,6 +227,10 @@ xv6_vfs_fill_node(struct vfs_mount *mnt, struct inode *ip, struct vfs_node *out)
   else
     out->mode = 0100000 | 0777;
   out->size = ip->size;
+  out->nlink = ip->nlink;
+  out->blocks = (ip->size + 511) / 512;
+  out->uid = 0;
+  out->gid = 0;
   out->mount = mnt;
   return 0;
 }
@@ -614,6 +618,7 @@ xv6_vfs_open(struct vfs_mount *mnt, char *path, int flags, struct file **fp)
   f->ip = ip;
   f->readable = !(omode & O_WRONLY);
   f->writable = (omode & O_WRONLY) || (omode & O_RDWR);
+  f->status_flags = omode & O_APPEND;
   f->vfs_ops = mnt->ops;
 
   if((omode & O_TRUNC) && ip->type == T_FILE)
@@ -696,6 +701,8 @@ xv6_vfs_write(struct file *f, uint64 addr, int n)
 
     begin_op();
     ilock(f->ip);
+    if(f->status_flags & O_APPEND)
+      f->off = f->ip->size;
     if((r = writei(f->ip, 1, addr + i, f->off, n1)) > 0)
       f->off += r;
     iunlock(f->ip);
@@ -752,19 +759,25 @@ static int
 ext4_vfs_lookup(struct vfs_mount *mnt, char *path, struct vfs_node *out)
 {
   struct vfs_block_mount *data = vfs_block_data(mnt);
-  uint64 mode = 0, size = 0, ino = 0;
+  struct lwext4_xv6_stat st;
 
   if(data == 0 || path == 0 || out == 0)
     return -1;
-  int type = 0;
-  if(lwext4_xv6_stat_by_path(data->dev, path, &mode, &size, &ino, &type) < 0)
+  if(lwext4_xv6_stat(data->dev, path, &st) < 0)
     return -1;
 
   memset(out, 0, sizeof(*out));
-  out->type = type;
-  out->ino = ino;
-  out->mode = mode;
-  out->size = size;
+  out->type = st.type;
+  out->ino = st.ino;
+  out->mode = st.mode;
+  out->size = st.size;
+  out->nlink = st.nlink;
+  out->blocks = st.blocks;
+  out->uid = st.uid;
+  out->gid = st.gid;
+  out->atime = st.atime;
+  out->mtime = st.mtime;
+  out->ctime = st.ctime;
   out->mount = mnt;
   return 0;
 }
@@ -852,13 +865,16 @@ ext4_vfs_open(struct vfs_mount *mnt, char *path, int flags, struct file **fp)
   if(lwext4_xv6_open(data->dev, path, omode, &handle, &type, 0, 0) < 0)
     return -1;
   if(type == T_DIR && (omode & 3) != O_RDONLY){
-    lwext4_xv6_close(handle);
+    lwext4_xv6_close_dir(handle);
     return -1;
   }
 
   f = filealloc();
   if(f == 0){
-    lwext4_xv6_close(handle);
+    if(type == T_DIR)
+      lwext4_xv6_close_dir(handle);
+    else
+      lwext4_xv6_close(handle);
     return -1;
   }
 
@@ -866,8 +882,10 @@ ext4_vfs_open(struct vfs_mount *mnt, char *path, int flags, struct file **fp)
   f->off = 0;
   f->ip = 0;
   f->fs_file = handle;
+  f->fs_is_dir = type == T_DIR;
   f->readable = !(omode & O_WRONLY);
   f->writable = (omode & O_WRONLY) || (omode & O_RDWR);
+  f->status_flags = omode & O_APPEND;
   f->vfs_ops = mnt->ops;
   safestrcpy(f->ext4_path, path, sizeof(f->ext4_path));
   *fp = f;
@@ -881,8 +899,13 @@ ext4_vfs_close(struct file *f)
     return -1;
   if(f->fs_file == 0)
     return 0;
-  if(lwext4_xv6_close(f->fs_file) < 0)
-    return -1;
+  if(f->fs_is_dir){
+    if(lwext4_xv6_close_dir(f->fs_file) < 0)
+      return -1;
+  } else {
+    if(lwext4_xv6_close(f->fs_file) < 0)
+      return -1;
+  }
   f->fs_file = 0;
   return 0;
 }
@@ -895,17 +918,17 @@ ext4_vfs_readdir(struct file *f, uint64 dirp, int nread)
 
   if(f == 0 || f->type != FD_EXT4 || nread < 48)
     return -1;
-  if(strncmp(myproc()->name, "busybox", 8) == 0 &&
-     strncmp(f->ext4_path, "/musl/ltp", 9) == 0 &&
-     (f->ext4_path[9] == 0 || f->ext4_path[9] == '/'))
-    return 0;
+  if(f->fs_is_dir == 0 || f->fs_file == 0)
+    return -1;
 
   for(;;){
     uint64 next, ino;
     uchar type;
     char name[256];
-    int ok = lwext4_xv6_dirent_by_path(FIRSTDEV, f->ext4_path, f->off, &next,
-                                       &ino, &type, name, sizeof(name));
+    if(nread - n < 280)
+      break;
+    int ok = lwext4_xv6_dirent_next(f->fs_file, &next, &ino, &type, name,
+                                    sizeof(name));
     if(ok < 0)
       return n > 0 ? n : -1;
     if(ok == 0)
@@ -931,7 +954,7 @@ ext4_vfs_read(struct file *f, uint64 addr, int n)
 
   if(f == 0 || f->type != FD_EXT4)
     return -1;
-  if(lwext4_xv6_path_is_dir(FIRSTDEV, f->ext4_path)){
+  if(f->fs_is_dir){
     struct dirent de;
     uint64 next, ino;
     uchar type;
@@ -941,8 +964,8 @@ ext4_vfs_read(struct file *f, uint64 addr, int n)
     if(n < sizeof(de))
       return -1;
     for(;;){
-      ok = lwext4_xv6_dirent_by_path(FIRSTDEV, f->ext4_path, f->off, &next,
-                                     &ino, &type, name, sizeof(name));
+      ok = lwext4_xv6_dirent_next(f->fs_file, &next, &ino, &type, name,
+                                  sizeof(name));
       if(ok <= 0)
         return ok;
       f->off = next;
@@ -995,6 +1018,12 @@ ext4_vfs_write(struct file *f, uint64 addr, int n)
 
     if(m > PGSIZE)
       m = PGSIZE;
+    if(f->status_flags & O_APPEND){
+      if(f->fs_file)
+        f->off = lwext4_xv6_file_size(f->fs_file);
+      else
+        f->off = lwext4_xv6_file_size_by_path(FIRSTDEV, f->ext4_path);
+    }
     if(copyin(myproc()->pagetable, buf, addr + done, m) < 0){
       kfree(buf);
       return done > 0 ? done : -1;
@@ -1045,21 +1074,19 @@ static int
 ext4_vfs_stat(struct file *f, uint64 addr)
 {
   struct stat st;
+  struct lwext4_xv6_stat est;
 
   if(f == 0 || f->type != FD_EXT4)
+    return -1;
+  if(lwext4_xv6_stat(FIRSTDEV, f->ext4_path, &est) < 0)
     return -1;
 
   memset(&st, 0, sizeof(st));
   st.dev = FIRSTDEV;
-  st.type = lwext4_xv6_path_is_dir(FIRSTDEV, f->ext4_path) ? T_DIR : T_FILE;
-  st.nlink = 1;
-  if(f->fs_file)
-    st.size = lwext4_xv6_file_size(f->fs_file);
-  else
-    st.size = lwext4_xv6_file_size_by_path(FIRSTDEV, f->ext4_path);
-  if(st.size == 0 && !lwext4_xv6_path_is_reg(FIRSTDEV, f->ext4_path) &&
-     !lwext4_xv6_path_is_dir(FIRSTDEV, f->ext4_path))
-    return -1;
+  st.ino = est.ino;
+  st.type = est.type;
+  st.nlink = est.nlink;
+  st.size = est.size;
   if(copyout(myproc()->pagetable, addr, (char *)&st, sizeof(st)) < 0)
     return -1;
   return 0;
@@ -1068,8 +1095,6 @@ ext4_vfs_stat(struct file *f, uint64 addr)
 int
 vfs_file_stat_node(struct file *f, struct vfs_node *node)
 {
-  uint64 mode = 0, size = 0, ino = 0;
-
   if(f == 0 || node == 0)
     return -1;
 
@@ -1082,13 +1107,21 @@ vfs_file_stat_node(struct file *f, struct vfs_node *node)
   }
 
   if(f->type == FD_EXT4){
-    int type = 0;
-    if(lwext4_xv6_stat_by_path(FIRSTDEV, f->ext4_path, &mode, &size, &ino, &type) < 0)
+    struct lwext4_xv6_stat st;
+
+    if(lwext4_xv6_stat(FIRSTDEV, f->ext4_path, &st) < 0)
       return -1;
-    node->type = type;
-    node->ino = ino;
-    node->mode = mode;
-    node->size = size;
+    node->type = st.type;
+    node->ino = st.ino;
+    node->mode = st.mode;
+    node->size = st.size;
+    node->nlink = st.nlink;
+    node->blocks = st.blocks;
+    node->uid = st.uid;
+    node->gid = st.gid;
+    node->atime = st.atime;
+    node->mtime = st.mtime;
+    node->ctime = st.ctime;
     return 0;
   }
 

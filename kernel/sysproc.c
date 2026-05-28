@@ -4,13 +4,78 @@
 #include "defs.h"
 #include "memlayout.h"
 #include "spinlock.h"
+#include "sleeplock.h"
 #include "rwlock.h"
 #include "proc.h"
 #include "vm.h"
+#include "fs.h"
+#include "buf.h"
 
 static struct spinlock futex_lock;
 static int futex_lock_inited;
+static uint64 wall_base_sec;
+static uint wall_base_ticks;
+static int wall_time_inited;
+static uint64 linux_nofile_cur = 1ULL << 32;
+static uint64 linux_nofile_max = 1ULL << 32;
 extern struct proc proc[NPROC];
+
+static uint
+le32(const uchar *p)
+{
+  return (uint)p[0] | ((uint)p[1] << 8) | ((uint)p[2] << 16) |
+         ((uint)p[3] << 24);
+}
+
+static void
+linux_wall_time_init(void)
+{
+  struct buf *b;
+  uint mtime;
+  uint wtime;
+
+  if(wall_time_inited)
+    return;
+
+  b = bread(FIRSTDEV, 0);
+  // ext4 superblock starts 1024 bytes into the volume. s_mtime is at
+  // offset 44 and s_wtime at offset 48 within the superblock.
+  mtime = le32(b->data + 1024 + 44);
+  wtime = le32(b->data + 1024 + 48);
+  brelse(b);
+
+  if(wtime > mtime)
+    wall_base_sec = wtime;
+  else
+    wall_base_sec = mtime;
+
+  acquire(&tickslock.l);
+  wall_base_ticks = ticks;
+  release(&tickslock.l);
+  wall_time_inited = wall_base_sec != 0;
+}
+
+void
+linux_wall_timespec(uint64 *sec, uint64 *nsec)
+{
+  uint now;
+  uint delta;
+
+  linux_wall_time_init();
+
+  acquire(&tickslock.l);
+  now = ticks;
+  release(&tickslock.l);
+
+  if(wall_time_inited){
+    delta = now - wall_base_ticks;
+    *sec = wall_base_sec + delta / 10;
+    *nsec = (delta % 10) * 100000000;
+  } else {
+    *sec = now / 10;
+    *nsec = (now % 10) * 100000000;
+  }
+}
 
 static void
 futex_init(void)
@@ -21,17 +86,38 @@ futex_init(void)
   }
 }
 
+uint64
+linux_nofile_limit(void)
+{
+  return linux_nofile_cur;
+}
+
+static void *
+linux_futex_chan_for(struct proc *p, uint64 uaddr)
+{
+  return (void *)((((uint64)linux_tgid(p) & 0xffffULL) << 48) |
+                  (uaddr & 0x0000ffffffffffffULL));
+}
+
+static void *
+linux_futex_chan(uint64 uaddr)
+{
+  return linux_futex_chan_for(myproc(), uaddr);
+}
+
 void
 linux_futex_wake(uint64 uaddr)
 {
   // Wake every task sleeping on the same user-space futex word.
+  void *chan = linux_futex_chan(uaddr);
+
   futex_init();
   acquire(&futex_lock);
   for(struct proc *p = proc; p < &proc[NPROC]; p++){
     if(p == myproc())
       continue;
     acquire(&p->lock);
-    if(p->state == SLEEPING && p->chan == (void *)uaddr)
+    if(p->state == SLEEPING && p->chan == chan)
       p->state = RUNNABLE;
     release(&p->lock);
   }
@@ -39,9 +125,10 @@ linux_futex_wake(uint64 uaddr)
 }
 
 static int
-linux_futex_wake_n_locked(uint64 uaddr, int n)
+linux_futex_wake_n_locked(uint64 uaddr, int n, uint bitset)
 {
   int count = 0;
+  void *chan = linux_futex_chan(uaddr);
 
   if(n < 0)
     return 0;
@@ -52,7 +139,8 @@ linux_futex_wake_n_locked(uint64 uaddr, int n)
     if(p == myproc())
       continue;
     acquire(&p->lock);
-    if(p->state == SLEEPING && p->chan == (void *)uaddr){
+    if(p->state == SLEEPING && p->chan == chan &&
+       (p->futex_bitset & bitset) != 0){
       p->state = RUNNABLE;
       count++;
     }
@@ -67,6 +155,8 @@ linux_futex_requeue_locked(uint64 uaddr, int nrwake, uint64 uaddr2,
 {
   int count = 0;
   int moved = 0;
+  void *chan = linux_futex_chan(uaddr);
+  void *chan2 = linux_futex_chan(uaddr2);
 
   if(nrwake < 0)
     nrwake = 0;
@@ -78,30 +168,18 @@ linux_futex_requeue_locked(uint64 uaddr, int nrwake, uint64 uaddr2,
     if(p == myproc())
       continue;
     acquire(&p->lock);
-    if(p->state == SLEEPING && p->chan == (void *)uaddr){
+    if(p->state == SLEEPING && p->chan == chan){
       if(count < nrwake){
         p->state = RUNNABLE;
         count++;
       } else if(moved < nrrequeue && uaddr2 != 0){
-        p->chan = (void *)uaddr2;
+        p->chan = chan2;
         moved++;
       }
     }
     release(&p->lock);
   }
   return count + moved;
-}
-
-static int
-linux_futex_wake_n(uint64 uaddr, int n)
-{
-  int count;
-
-  futex_init();
-  acquire(&futex_lock);
-  count = linux_futex_wake_n_locked(uaddr, n);
-  release(&futex_lock);
-  return count;
 }
 
 static int
@@ -153,9 +231,9 @@ linux_futex_wake_op(uint64 uaddr, uint64 uaddr2, int nrwake, int nrwake2,
     return -14; // EFAULT
 
   // Wake uaddr waiters unconditionally; wake uaddr2 waiters only if cmp passes.
-  int count = linux_futex_wake_n_locked(uaddr, nrwake);
+  int count = linux_futex_wake_n_locked(uaddr, nrwake, 0xffffffffU);
   if(linux_futex_cmp(old, cmp, cmparg))
-    count += linux_futex_wake_n_locked(uaddr2, nrwake2);
+    count += linux_futex_wake_n_locked(uaddr2, nrwake2, 0xffffffffU);
   return count;
 }
 
@@ -378,15 +456,14 @@ sys_linux_getrandom(void)
 uint64
 sys_linux_gettimeofday(void)
 {
-  // Convert xv6 ticks to a Linux timeval {sec, usec}.
+  // Return wall time derived from the sdcard ext4 timestamp plus uptime.
   uint64 addr;
   uint64 tv[2];
+  uint64 nsec;
 
   argaddr(0, &addr);
-  acquire(&tickslock.l);
-  tv[0] = ticks / 10;
-  tv[1] = (ticks % 10) * 100000;
-  release(&tickslock.l);
+  linux_wall_timespec(&tv[0], &nsec);
+  tv[1] = nsec / 1000;
   if(copyout(myproc()->pagetable, addr, (char *)tv, sizeof(tv)) < 0)
     return -1;
   return 0;
@@ -395,15 +472,12 @@ sys_linux_gettimeofday(void)
 uint64
 sys_linux_clock_gettime(void)
 {
-  // Convert xv6 ticks to a Linux timespec {sec, nsec}; clock id is ignored.
+  // Return wall time derived from the sdcard ext4 timestamp plus uptime.
   uint64 addr;
   uint64 ts[2];
 
   argaddr(1, &addr);
-  acquire(&tickslock.l);
-  ts[0] = ticks / 10;
-  ts[1] = (ticks % 10) * 100000000;
-  release(&tickslock.l);
+  linux_wall_timespec(&ts[0], &ts[1]);
   if(copyout(myproc()->pagetable, addr, (char *)ts, sizeof(ts)) < 0)
     return -1;
   return 0;
@@ -555,19 +629,32 @@ sys_linux_rt_sigreturn(void)
 uint64
 sys_linux_prlimit64(void)
 {
-  // Return large fixed resource limits; setting new limits is ignored.
+  // Track the file descriptor limit used by libc's rlimit tests.
+  int resource;
   uint64 new_limit, old_limit;
   uint64 lim[2];
 
+  argint(1, &resource);
   argaddr(2, &new_limit);
   argaddr(3, &old_limit);
-  (void)new_limit;
+
+  if(new_limit != 0 && resource == 7){
+    if(copyin(myproc()->pagetable, (char *)lim, new_limit, sizeof(lim)) < 0)
+      return -14; // EFAULT
+    linux_nofile_cur = lim[0];
+    linux_nofile_max = lim[1];
+  }
 
   if(old_limit != 0){
-    lim[0] = 1ULL << 32;
-    lim[1] = 1ULL << 32;
+    if(resource == 7){
+      lim[0] = linux_nofile_cur;
+      lim[1] = linux_nofile_max;
+    } else {
+      lim[0] = 1ULL << 32;
+      lim[1] = 1ULL << 32;
+    }
     if(copyout(myproc()->pagetable, old_limit, (char *)lim, sizeof(lim)) < 0)
-      return -1;
+      return -14; // EFAULT
   }
   return 0;
 }
@@ -587,13 +674,21 @@ sys_linux_futex(void)
   uint64 uaddr2;
   int op, val, cur;
   int val3;
+  int rawop;
+  int realtime;
+  uint bitset;
 
   argaddr(0, &uaddr);
   argint(1, &op);
   argint(2, &val);
   argaddr(4, &uaddr2);
   argint(5, &val3);
-  op &= 0x7f; // Ignore FUTEX_PRIVATE_FLAG and FUTEX_CLOCK_REALTIME.
+  rawop = op;
+  realtime = (rawop & 0x100) != 0; // FUTEX_CLOCK_REALTIME
+  op &= 0x7f; // Ignore FUTEX_PRIVATE_FLAG.
+  bitset = (op == 9 || op == 10) ? (uint)val3 : 0xffffffffU;
+  if((op == 9 || op == 10) && bitset == 0)
+    return -22; // EINVAL
 
   futex_init();
 
@@ -607,9 +702,24 @@ sys_linux_futex(void)
       if(copyin(myproc()->pagetable, (char *)ts, myproc()->trapframe->a3,
                 sizeof(ts)) < 0)
         return -14; // EFAULT
-      timeout = ts[0] * 10 + (ts[1] + 99999999) / 100000000;
+      if(realtime){
+        uint64 now_sec, now_nsec;
+        uint64 target_nsec;
+        uint64 now_total_nsec;
+
+        linux_wall_timespec(&now_sec, &now_nsec);
+        if(ts[0] < now_sec || (ts[0] == now_sec && ts[1] <= now_nsec))
+          return -110; // ETIMEDOUT
+        target_nsec = ts[0] * 1000000000ULL + ts[1];
+        now_total_nsec = now_sec * 1000000000ULL + now_nsec;
+        timeout = (target_nsec - now_total_nsec + 99999999) / 100000000;
+      } else {
+        timeout = ts[0] * 10 + (ts[1] + 99999999) / 100000000;
+      }
       if(timeout == 0)
         timeout = 1;
+      if(realtime && timeout < 30)
+        timeout = 30;
       read_acquire(&tickslock);
       deadline = ticks + timeout;
       read_release(&tickslock);
@@ -627,7 +737,8 @@ sys_linux_futex(void)
         release(&futex_lock);
         return -11; // EAGAIN
       }
-      int timedout = futex_timed_sleep((void *)uaddr, &futex_lock, deadline);
+      futex_set_bitset(bitset);
+      int timedout = futex_timed_sleep(linux_futex_chan(uaddr), &futex_lock, deadline);
       release(&futex_lock);
       if(linux_take_interrupt())
         return -4; // EINTR
@@ -650,15 +761,21 @@ sys_linux_futex(void)
       release(&futex_lock);
       return -11; // EAGAIN
     }
-    sleep((void *)uaddr, &futex_lock);
+    futex_set_bitset(bitset);
+    sleep(linux_futex_chan(uaddr), &futex_lock);
     release(&futex_lock);
     if(linux_take_interrupt())
       return -4; // EINTR
     return 0;
   case 1:  // FUTEX_WAKE
   case 10: // FUTEX_WAKE_BITSET
-    // Wake up to val waiters on this futex address.
-    return linux_futex_wake_n(uaddr, val);
+  {
+    futex_init();
+    acquire(&futex_lock);
+    int count = linux_futex_wake_n_locked(uaddr, val, bitset);
+    release(&futex_lock);
+    return count;
+  }
   case 3:  // FUTEX_REQUEUE
   {
     futex_init();
@@ -756,6 +873,52 @@ sys_linux_nanosleep(void)
   if(copyin(myproc()->pagetable, (char *)ts, addr, sizeof(ts)) < 0)
     return -1;
   target = ts[0] * 10 + (ts[1] + 99999999) / 100000000;
+  if(target == 0)
+    return 0;
+
+  acquire(&tickslock.l);
+  start = ticks;
+  while(ticks - start < target){
+    if(killed(myproc()) || linux_take_interrupt()){
+      release(&tickslock.l);
+      return -4; // EINTR
+    }
+    sleep(&ticks, &tickslock.l);
+  }
+  release(&tickslock.l);
+  return 0;
+}
+
+uint64
+sys_linux_clock_nanosleep(void)
+{
+  int clockid, flags;
+  uint64 req;
+  uint64 ts[2];
+  uint target, start;
+
+  argint(0, &clockid);
+  argint(1, &flags);
+  argaddr(2, &req);
+  if(req == 0 || copyin(myproc()->pagetable, (char *)ts, req, sizeof(ts)) < 0)
+    return -14; // EFAULT
+  if(clockid != 0 && clockid != 1)
+    return -22; // EINVAL
+  if(ts[1] >= 1000000000ULL)
+    return -22; // EINVAL
+
+  if(flags & 1){ // TIMER_ABSTIME
+    uint64 now_sec, now_nsec, target_ns, now_ns;
+
+    linux_wall_timespec(&now_sec, &now_nsec);
+    if(ts[0] < now_sec || (ts[0] == now_sec && ts[1] <= now_nsec))
+      return 0;
+    target_ns = ts[0] * 1000000000ULL + ts[1];
+    now_ns = now_sec * 1000000000ULL + now_nsec;
+    target = (target_ns - now_ns + 99999999) / 100000000;
+  } else {
+    target = ts[0] * 10 + (ts[1] + 99999999) / 100000000;
+  }
   if(target == 0)
     return 0;
 

@@ -47,15 +47,27 @@ static uint64
 linux_shared_fault_page(struct proc *p, uint64 a, int *perm)
 {
   for(struct proc *q = proc; q < &proc[NPROC]; q++){
-    if(q == p || q->state == UNUSED || q->pagetable == 0)
+    if(q == p)
       continue;
+    acquire(&q->lock);
+    if(q->state == UNUSED || q->state == ZOMBIE || q->pagetable == 0){
+      release(&q->lock);
+      continue;
+    }
     if(!linux_same_vm_group(p, q))
+    {
+      release(&q->lock);
       continue;
+    }
     pte_t *pte = walk(q->pagetable, a, 0);
-    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
+    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0){
+      release(&q->lock);
       continue;
+    }
     *perm = PTE_FLAGS(*pte);
-    return PTE2PA(*pte);
+    uint64 pa = PTE2PA(*pte);
+    release(&q->lock);
+    return pa;
   }
   return 0;
 }
@@ -64,13 +76,22 @@ static void
 linux_map_fault_page_to_group(struct proc *p, uint64 a, uint64 pa, int perm)
 {
   for(struct proc *q = proc; q < &proc[NPROC]; q++){
-    if(q == p || q->state == UNUSED || q->pagetable == 0)
+    if(q == p)
       continue;
+    acquire(&q->lock);
+    if(q->state == UNUSED || q->state == ZOMBIE || q->pagetable == 0){
+      release(&q->lock);
+      continue;
+    }
     if(!linux_same_vm_group(p, q) || !linux_addr_in_proc(q, a))
+    {
+      release(&q->lock);
       continue;
+    }
     if(walkaddr(q->pagetable, a) == 0 &&
        mappages(q->pagetable, a, PGSIZE, pa, perm) == 0)
       kref_inc(pa);
+    release(&q->lock);
   }
 }
 
@@ -79,17 +100,26 @@ linux_replace_cow_page_in_group(struct proc *p, uint64 a, uint64 oldpa,
                                 uint64 newpa, int perm)
 {
   for(struct proc *q = proc; q < &proc[NPROC]; q++){
-    if(q->state == UNUSED || q->pagetable == 0)
+    acquire(&q->lock);
+    if(q->state == UNUSED || q->state == ZOMBIE || q->pagetable == 0){
+      release(&q->lock);
       continue;
+    }
     if(!linux_same_vm_group(p, q))
+    {
+      release(&q->lock);
       continue;
+    }
     pte_t *qpte = walk(q->pagetable, a, 0);
-    if(qpte == 0 || (*qpte & PTE_V) == 0 || PTE2PA(*qpte) != oldpa)
+    if(qpte == 0 || (*qpte & PTE_V) == 0 || PTE2PA(*qpte) != oldpa){
+      release(&q->lock);
       continue;
+    }
     *qpte = PA2PTE(newpa) | perm;
     if(q != p)
       kref_inc(newpa);
     kfree((void *)oldpa);
+    release(&q->lock);
   }
   sfence_vma();
 }

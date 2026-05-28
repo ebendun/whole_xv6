@@ -10,6 +10,7 @@
 #define SIGCHLD 17
 #define LINUX_O_CREAT 0x40
 #define LINUX_O_TRUNC 0x200
+#define LINUX_O_APPEND 0x400
 //turn the xv6 syscall to linux syscall
 int
 fork(void)
@@ -76,6 +77,8 @@ open_flags_to_linux(int flags)
     oflags |= LINUX_O_CREAT;
   if(flags & O_TRUNC)
     oflags |= LINUX_O_TRUNC;
+  if(flags & O_APPEND)
+    oflags |= LINUX_O_APPEND;
   return oflags;
 }
 

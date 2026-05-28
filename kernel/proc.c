@@ -38,7 +38,11 @@ linux_tgid(struct proc *p)
 {
   if(p == 0)
     return -1;
-  return p->linux_tgid ? p->linux_tgid : p->pid;
+  if(p->linux_tgid)
+    return p->linux_tgid;
+  if(p->linux_group_leader && p->linux_group_leader->linux_tgid)
+    return p->linux_group_leader->linux_tgid;
+  return p->pid;
 }
 
 static int
@@ -79,6 +83,60 @@ linux_drop_vma_refs(struct proc *p)
       fileclose(p->vmas[i].f);
   }
   memset(p->vmas, 0, sizeof(p->vmas));
+}
+
+static int
+linux_proc_has_vma(struct proc *p, uint64 a)
+{
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used &&
+       a >= p->vmas[i].addr &&
+       a < p->vmas[i].addr + p->vmas[i].len)
+      return 1;
+  }
+  return 0;
+}
+
+static void
+linux_preserve_thread_vma_pages(struct proc *p)
+{
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used == 0)
+      continue;
+    for(uint64 a = p->vmas[i].addr;
+        a < p->vmas[i].addr + PGROUNDUP(p->vmas[i].len);
+        a += PGSIZE){
+      pte_t *pte = walk(p->pagetable, a, 0);
+      if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
+        continue;
+
+      uint64 pa = PTE2PA(*pte);
+      uint flags = PTE_FLAGS(*pte);
+      for(struct proc *q = proc; q < &proc[NPROC]; q++){
+        if(q == p || q->state == UNUSED || q->state == ZOMBIE ||
+           q->pagetable == 0)
+          continue;
+        if(!linux_same_thread_group(p, q) || !linux_proc_has_vma(q, a))
+          continue;
+        if(walkaddr(q->pagetable, a) != 0)
+          break;
+        if(mappages(q->pagetable, a, PGSIZE, pa, flags) == 0)
+          kref_inc(pa);
+        break;
+      }
+    }
+  }
+}
+
+static void
+linux_unmap_thread_vmas(struct proc *p)
+{
+  for(int i = 0; i < NVMA; i++){
+    if(p->vmas[i].used == 0)
+      continue;
+    uvmunmap(p->pagetable, p->vmas[i].addr,
+             PGROUNDUP(p->vmas[i].len) / PGSIZE, 1);
+  }
 }
 
 static void
@@ -470,8 +528,6 @@ linux_thread_leader(struct proc *p)
 {
   if(p && p->linux_group_leader)
     return p->linux_group_leader;
-  while(p && p->linux_share_vm && p->parent)
-    p = p->parent;
   return p;
 }
 
@@ -993,6 +1049,12 @@ forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, int share_vm,
   }
   if(share_files)
     p->linux_share_files = 1;
+  if(share_vm){
+    p->linux_share_vm = 1;
+    if(p->pincpu == 0)
+      p->pincpu = &cpus[0];
+    np->pincpu = p->pincpu;
+  }
   if(share_fs)
     p->linux_share_fs = 1;
 
@@ -1059,8 +1121,11 @@ kexit(int status)
 
   if(!thread_only)
     proc_munmapall(p);
-  else
+  else {
+    linux_preserve_thread_vma_pages(p);
+    linux_unmap_thread_vmas(p);
     linux_drop_vma_refs(p);
+  }
 
   // Close all open files.
   proc_close_files(p);
@@ -1283,12 +1348,12 @@ scheduler(void)
       if(p->state != UNUSED) {
         nproc++;
       }
-      if(p->state == ZOMBIE && linux_group_leader(p) != p){
-        freeproc(p);
+      if(p->pincpu && p->pincpu != c) {
         release(&p->lock);
         continue;
       }
-      if(p->pincpu && p->pincpu != c) {
+      if(p->state == ZOMBIE && linux_group_leader(p) != p){
+        freeproc(p);
         release(&p->lock);
         continue;
       }
@@ -1409,12 +1474,14 @@ sleep(void *chan, struct spinlock *lk)
 
   // Go to sleep.
   p->chan = chan;
+  p->futex_bitset = 0xffffffffU;
   p->state = SLEEPING;
 
   sched();
 
   // Tidy up.
   p->chan = 0;
+  p->futex_bitset = 0;
 
   // Reacquire original lock.
   release(&p->lock);
@@ -1431,6 +1498,7 @@ futex_timed_sleep(void *chan, struct spinlock *lk, uint deadline)
   release(lk);
 
   p->chan = chan;
+  p->futex_bitset = 0xffffffffU;
   p->futex_deadline = deadline;
   p->futex_timedout = 0;
   p->state = SLEEPING;
@@ -1439,12 +1507,19 @@ futex_timed_sleep(void *chan, struct spinlock *lk, uint deadline)
 
   timedout = p->futex_timedout;
   p->chan = 0;
+  p->futex_bitset = 0;
   p->futex_deadline = 0;
   p->futex_timedout = 0;
 
   release(&p->lock);
   acquire(lk);
   return timedout;
+}
+
+void
+futex_set_bitset(uint bitset)
+{
+  myproc()->futex_bitset = bitset;
 }
 
 void

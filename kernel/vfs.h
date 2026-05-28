@@ -27,6 +27,13 @@ struct vfs_node {
   uint64 ino;
   uint64 mode;
   uint64 size;
+  uint64 nlink;
+  uint64 blocks;
+  uint uid;
+  uint gid;
+  uint atime;
+  uint mtime;
+  uint ctime;
   struct vfs_mount *mount;
   void *private;
 };
