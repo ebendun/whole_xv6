@@ -144,23 +144,29 @@ struct proc {
   char linux_exe_path[MAXPATH]; // Absolute Linux-visible executable path
   pagetable_t pagetable;       // User page table
   struct trapframe *trapframe; // data page for trampoline.S
-  struct usyscall *usyscall;   // shared user/kernel page
   char *sigreturn;             // user executable rt_sigreturn stub
-  struct trapframe alarm_trapframe; // saved user registers for sigalarm
-  int alarm_interval;          // ticks between alarms
-  int alarm_ticks;             // ticks since last alarm
-  uint64 alarm_handler;        // user handler pc
-  int alarm_inflight;          // handler active
   struct context context;      // swtch() here to run process
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   struct proc_vfs_cwd vfs_root;// Process root in VFS terms
   struct proc_vfs_cwd vfs_cwd; // Current directory in VFS terms
   char name[16];               // Process name (debugging)
-  int interpose_mask;          // Bit mask of blocked syscalls
-  char interpose_path[MAXPATH];// Allowed path for masked open/exec
   struct cpu *pincpu;
   uint64 mmap_base;            // next mmap allocation address (grows down)
   struct vma vmas[NVMA];
   uint64 clear_child_tid;      // Linux CLONE_CHILD_CLEARTID futex address
+  
+  //for page tables lab
+  struct usyscall *usyscall;   // shared user/kernel page
+
+  //for syscall lab
+  int interpose_mask;          // Bit mask of blocked syscalls
+  char interpose_path[MAXPATH];// Allowed path for masked open/exec
+
+  //for trap lab
+  struct trapframe alarm_trapframe; // saved user registers for sigalarm
+  int alarm_interval;          // ticks between alarms
+  int alarm_ticks;             // ticks since last alarm
+  uint64 alarm_handler;        // user handler pc
+  int alarm_inflight;          // handler active
 };

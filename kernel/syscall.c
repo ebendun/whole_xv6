@@ -106,6 +106,7 @@ extern uint64 sys_unbind(void);
 extern uint64 sys_send(void);
 extern uint64 sys_recv(void);
 extern uint64 sys_cpupin(void);
+extern uint64 sys_halt(void);
 extern uint64 sys_munmap(void);
 extern uint64 sys_linux_getcwd(void);
 extern uint64 sys_linux_openat(void);
@@ -288,6 +289,7 @@ static struct syscall_entry xv6_syscalls[] = {
   {SYS_send, sys_send},
   {SYS_recv, sys_recv},
   {SYS_cpupin, sys_cpupin},
+  {SYS_halt, sys_halt},
 };
 
 static uint64 (*syscall_lookup(int num))(void)

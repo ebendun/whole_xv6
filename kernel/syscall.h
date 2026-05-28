@@ -99,3 +99,4 @@
 #define SYS_send       1010
 #define SYS_recv       1011
 #define SYS_cpupin     1012
+#define SYS_halt       1013

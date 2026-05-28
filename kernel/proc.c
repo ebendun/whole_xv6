@@ -1074,11 +1074,6 @@ forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, int share_vm,
   return pid;
 }
 
-int
-kfork(void)
-{
-  return forkat(0, 0, 0, 0, 0, 0, 0);
-}
 
 int
 kclone(uint64 stack, uint64 tls, uint64 clear_child_tid, int share_vm,

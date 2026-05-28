@@ -93,6 +93,7 @@ entry("brk");
 entry("munmap");
 entry("clone");
 entry("execve");
+entry("halt");
 entry("mmap");
 entry("mprotect");
 entry("wait4");

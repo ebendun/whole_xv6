@@ -581,12 +581,14 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
 
     if((*pte & PTE_V) == 0)
       continue;
-
+    //if superpage
     if(level == 1 && PTE_LEAF(*pte)) {
       if((i % SUPERPGSIZE) != 0)
         panic("uvmcopy: unaligned superpage");
       pa = PTE2PA(*pte);
       flags = PTE_FLAGS(*pte);
+
+      //convert writable to cow and set the flag
       if(flags & PTE_W){
         flags = (flags & ~PTE_W) | PTE_COW;
         *pte = PA2PTE(pa) | flags;
@@ -601,6 +603,7 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
       continue;
     }
 
+    //if normal page, do the same thing
     szinc = PGSIZE;
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);
@@ -642,12 +645,14 @@ uvmshare(pagetable_t old, pagetable_t new, uint64 sz)
 
     if((*pte & PTE_V) == 0)
       continue;
-
+    //if superpage
     if(level == 1 && PTE_LEAF(*pte)){
       if((i % SUPERPGSIZE) != 0)
         panic("uvmshare: unaligned superpage");
       pa = PTE2PA(*pte);
       flags = PTE_FLAGS(*pte);
+
+      //estimate the cow flag cause we should share the page
       if(flags & PTE_COW){
         flags = (flags | PTE_W) & ~PTE_COW;
         if(superref_get(pa) == 1){
@@ -671,6 +676,7 @@ uvmshare(pagetable_t old, pagetable_t new, uint64 sz)
       continue;
     }
 
+    //if normal page, do the same thing
     szinc = PGSIZE;
     pa = PTE2PA(*pte);
     flags = PTE_FLAGS(*pte);

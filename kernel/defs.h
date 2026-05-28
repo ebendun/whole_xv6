@@ -98,7 +98,6 @@ void            backtrace(void);
 int             cpuid(void);
 void            kexit(int);
 void            kexit_group(int);
-int             kfork(void);
 int             kclone(uint64, uint64, uint64, int, int, int, int);
 int             linux_tgid(struct proc *);
 void            linux_sync_file_table(struct proc *);
@@ -208,6 +207,7 @@ void            timerinit(void);
 
 // sbi.c
 void            start_other_harts(void);
+void            sbi_shutdown(void);
 
 // uart.c
 void            uartinit(void);

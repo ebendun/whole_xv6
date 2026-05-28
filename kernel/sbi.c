@@ -9,6 +9,10 @@ extern void _entry(void);
 #define SBI_HSM_HART_START 0
 #define SBI_HSM_HART_GET_STATUS 2
 #define SBI_HSM_HART_STARTED 0
+#define SBI_EXT_SRST 0x53525354
+#define SBI_SRST_SYSTEM_RESET 0
+#define SBI_SRST_RESET_TYPE_SHUTDOWN 0
+#define SBI_SRST_RESET_REASON_NONE 0
 
 struct sbiret {
   long error;
@@ -51,4 +55,13 @@ start_other_harts()
         break;
     }
   }
+}
+
+void
+sbi_shutdown(void)
+{
+  sbi_call(SBI_EXT_SRST, SBI_SRST_SYSTEM_RESET,
+           SBI_SRST_RESET_TYPE_SHUTDOWN, SBI_SRST_RESET_REASON_NONE, 0);
+  for(;;)
+    ;
 }

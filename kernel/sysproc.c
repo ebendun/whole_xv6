@@ -10,6 +10,7 @@
 #include "vm.h"
 #include "fs.h"
 #include "buf.h"
+#include "flag.h"
 
 static struct spinlock futex_lock;
 static int futex_lock_inited;
@@ -90,6 +91,13 @@ uint64
 linux_nofile_limit(void)
 {
   return linux_nofile_cur;
+}
+
+uint64
+sys_halt(void)
+{
+  sbi_shutdown();
+  return 0;
 }
 
 static void *
@@ -257,12 +265,6 @@ sys_getpid(void)
   return p->pid;
 }
 
-uint64
-sys_fork(void)
-{
-  // Create a child process with a copied address space.
-  return kfork();
-}
 
 uint64
 sys_linux_clone(void)
@@ -277,18 +279,23 @@ sys_linux_clone(void)
   argaddr(3, &tls);
   argaddr(4, &ctid);
 
-  if((flags & 0x80000) == 0) // CLONE_SETTLS
+  if((flags & CLONE_SETTLS) == 0)
     tls = 0;
 
   // Translate the Linux clone flags this kernel understands into kclone args.
-  pid = kclone(stack, tls, (flags & 0x200000) ? ctid : 0,
-               (flags & 0x100) != 0, (flags & 0x400) != 0,
-               (flags & 0x200) != 0, (flags & 0x10000) != 0);
-  if(pid > 0 && (flags & 0x100000) && ptid != 0){
+  int share_vm = (flags & CLONE_VM) != 0;
+  int share_files = (flags & CLONE_FILES) != 0;
+  int share_fs = (flags & CLONE_FS) != 0;
+  int clone_thread = (flags & CLONE_THREAD) != 0;
+  uint64 clear_child_tid = (flags & CLONE_CHILD_CLEARTID) ? ctid : 0;
+
+  pid = kclone(stack, tls, clear_child_tid,
+               share_vm, share_files, share_fs, clone_thread);
+  if(pid > 0 && (flags & CLONE_PARENT_SETTID) && ptid != 0){
     int tid = pid;
     copyout(myproc()->pagetable, ptid, (char *)&tid, sizeof(tid));
   }
-  if(pid > 0 && (flags & 0x1000000) && ctid != 0){
+  if(pid > 0 && (flags & CLONE_CHILD_SETTID) && ctid != 0){
     int tid = pid;
     copyout(myproc()->pagetable, ctid, (char *)&tid, sizeof(tid));
   }
@@ -684,8 +691,8 @@ sys_linux_futex(void)
   argaddr(4, &uaddr2);
   argint(5, &val3);
   rawop = op;
-  realtime = (rawop & 0x100) != 0; // FUTEX_CLOCK_REALTIME
-  op &= 0x7f; // Ignore FUTEX_PRIVATE_FLAG.
+  realtime = (rawop & FUTEX_CLOCK_REALTIME) != 0;
+  op &= ~FUTEX_PRIVATE_FLAG;
   bitset = (op == 9 || op == 10) ? (uint)val3 : 0xffffffffU;
   if((op == 9 || op == 10) && bitset == 0)
     return -22; // EINVAL

@@ -40,6 +40,7 @@ int unbind(uint16);
 int send(uint16, uint32, uint16, char *, uint32);
 int recv(uint16, uint32*, uint16*, char *, uint32);
 int cpupin(int);
+int halt(void);
 
 // raw Linux-numbered syscall stubs
 int __sys_getcwd(char*, int);
@@ -118,6 +119,7 @@ int __sys_setsockopt(int, int, int, const void*, int);
 uint64 __sys_brk(uint64);
 int __sys_munmap(void *, size_t);
 int __sys_execve(const char*, char**, char**);
+int __sys_halt(void);
 void* __sys_mmap(void *, size_t, int, int, int, off_t);
 int __sys_mprotect(void*, size_t, int);
 int __sys_wait4(int, int*, int, void*);

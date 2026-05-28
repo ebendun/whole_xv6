@@ -220,6 +220,12 @@ cpupin(int cpu)
   return __sys_cpupin(cpu);
 }
 
+int
+halt(void)
+{
+  return __sys_halt();
+}
+
 //
 // wrapper so that it's OK if main() does not call exit().
 //

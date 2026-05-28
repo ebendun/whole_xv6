@@ -101,7 +101,7 @@ endif
 QEMU = qemu-system-riscv64
 MIN_QEMU_VERSION = 7.2
 
-all: kernel-rv kernel-la
+all: kernel-rv kernel-la disk.img disk-la.img
 
 kernel-rv: $K/kernel
 	cp $K/kernel kernel-rv
@@ -110,6 +110,12 @@ kernel-rv: $K/kernel
 # contest artifact present; replace this rule when a LoongArch backend exists.
 kernel-la: $K/kernel
 	cp $K/kernel kernel-la
+
+disk.img: fs.img
+	cp fs.img disk.img
+
+disk-la.img: fs.img
+	cp fs.img disk-la.img
 
 CC = $(TOOLPREFIX)gcc
 AS = $(TOOLPREFIX)gas

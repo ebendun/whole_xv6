@@ -9,7 +9,51 @@
 #include "user/user.h"
 #include "kernel/fcntl.h"
 
-char *argv[] = { "/bin/sh", 0 };
+char *shargv[] = { "/bin/sh", 0 };
+
+struct test_entry {
+  char *dir;
+  char *script;
+};
+
+struct test_entry tests[] = {
+  { "/ext4/musl", "./basic_testcode.sh" },
+  { "/ext4/musl", "./busybox_testcode.sh" },
+  { "/ext4/musl", "./libctest_testcode.sh" },
+  { 0, 0 },
+};
+
+static void
+run_test(struct test_entry *test)
+{
+  char *argv[] = { test->script, 0 };
+  int pid;
+  int fd;
+
+  if(chdir(test->dir) < 0){
+    printf("init: cannot cd %s\n", test->dir);
+    return;
+  }
+
+  fd = open(test->script, O_RDONLY);
+  if(fd < 0){
+    printf("init: skip missing %s/%s\n", test->dir, test->script);
+    return;
+  }
+  close(fd);
+
+  pid = fork();
+  if(pid < 0){
+    printf("init: fork failed for %s/%s\n", test->dir, test->script);
+    return;
+  }
+  if(pid == 0){
+    exec(test->script, argv);
+    printf("init: exec %s/%s failed\n", test->dir, test->script);
+    exit(1);
+  }
+  wait((int *)0);
+}
 
 int
 main(void)
@@ -32,6 +76,10 @@ main(void)
   dup(0);  // stdout
   dup(0);  // stderr
 
+  for(struct test_entry *test = tests; test->script; test++)
+    run_test(test);
+  halt();
+
   for(;;){
     printf("init: starting sh\n");
     pid = fork();
@@ -40,7 +88,7 @@ main(void)
       exit(1);
     }
     if(pid == 0){
-      exec("/bin/sh", argv);
+      exec("/bin/sh", shargv);
       printf("init: exec sh failed\n");
       exit(1);
     }
