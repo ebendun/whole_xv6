@@ -288,17 +288,11 @@ sys_linux_clone(void)
   int share_fs = (flags & CLONE_FS) != 0;
   int clone_thread = (flags & CLONE_THREAD) != 0;
   uint64 clear_child_tid = (flags & CLONE_CHILD_CLEARTID) ? ctid : 0;
+  uint64 set_parent_tid = (flags & CLONE_PARENT_SETTID) ? ptid : 0;
+  uint64 set_child_tid = (flags & CLONE_CHILD_SETTID) ? ctid : 0;
 
-  pid = kclone(stack, tls, clear_child_tid,
+  pid = kclone(stack, tls, clear_child_tid, set_parent_tid, set_child_tid,
                share_vm, share_files, share_fs, clone_thread);
-  if(pid > 0 && (flags & CLONE_PARENT_SETTID) && ptid != 0){
-    int tid = pid;
-    copyout(myproc()->pagetable, ptid, (char *)&tid, sizeof(tid));
-  }
-  if(pid > 0 && (flags & CLONE_CHILD_SETTID) && ctid != 0){
-    int tid = pid;
-    copyout(myproc()->pagetable, ctid, (char *)&tid, sizeof(tid));
-  }
   return pid;
 }
 
@@ -571,7 +565,7 @@ sys_linux_rt_sigtimedwait(void)
 uint64
 sys_linux_rt_sigaction(void)
 {
-  // Record glibc's internal cancellation signal handler when installed.
+  // Record the handler used by libc for internal realtime signals.
   int sig;
   uint64 act, handler;
 
@@ -580,7 +574,7 @@ sys_linux_rt_sigaction(void)
   if((sig == 32 || sig == 33) && act != 0){
     if(copyin(myproc()->pagetable, (char *)&handler, act, sizeof(handler)) < 0)
       return -14; // EFAULT
-    linux_set_sigcancel_handler(handler);
+    linux_set_rt_signal_handler(handler);
   }
   return 0;
 }
@@ -823,12 +817,7 @@ sys_linux_tgkill(void)
   argint(0, &tgid);
   argint(1, &tid);
   argint(2, &sig);
-  for(struct proc *p = proc; p < &proc[NPROC]; p++){
-    if(p->state != UNUSED && p->pid == tid && linux_tgid(p) != tgid)
-      return -1;
-  }
-  linux_interrupt(tid, sig >= 32, myproc()->pid);
-  return 0;
+  return linux_interrupt(tgid, tid, sig, myproc()->pid);
 }
 
 uint64
@@ -839,8 +828,7 @@ sys_linux_tkill(void)
 
   argint(0, &tid);
   argint(1, &sig);
-  linux_interrupt(tid, sig >= 32, myproc()->pid);
-  return 0;
+  return linux_interrupt(0, tid, sig, myproc()->pid);
 }
 
 uint64

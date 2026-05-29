@@ -1388,7 +1388,7 @@ vfs_root_mount(void)
 }
 
 static int
-vfs_set_proc_path(struct proc_vfs_cwd *dst, char *abs_path)
+vfs_set_proc_path(struct proc_vfs_path *dst, char *abs_path)
 {
   struct vfs_path vp;
 

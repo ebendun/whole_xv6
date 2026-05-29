@@ -357,14 +357,18 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  //for xv6 lab
   p->interpose_mask = 0;
   p->interpose_path[0] = 0;
+
+  //for convenient, we use xv6'fs as init fs
   p->vfs_root.mount = vfs_root_mount();
   safestrcpy(p->vfs_root.inner, "/", sizeof(p->vfs_root.inner));
   safestrcpy(p->vfs_root.abs_path, "/", sizeof(p->vfs_root.abs_path));
   p->vfs_cwd.mount = vfs_root_mount();
   safestrcpy(p->vfs_cwd.inner, "/", sizeof(p->vfs_cwd.inner));
   safestrcpy(p->vfs_cwd.abs_path, "/", sizeof(p->vfs_cwd.abs_path));
+  
   p->mmap_base = USIGRETURN;
   p->is_linux = 0;
   p->linux_brk = 0;
@@ -382,7 +386,7 @@ found:
   p->linux_group_xstate = 0;
   p->linux_thread_count = 1;
   p->linux_group_leader = p;
-  p->linux_sigcancel_handler = 0;
+  p->linux_rt_signal_handler = 0;
   p->linux_sigmask = 0;
   p->linux_exe_path[0] = 0;
   memset(p->vmas, 0, sizeof(p->vmas));
@@ -468,7 +472,7 @@ freeproc(struct proc *p)
   p->linux_group_xstate = 0;
   p->linux_thread_count = 0;
   p->linux_group_leader = 0;
-  p->linux_sigcancel_handler = 0;
+  p->linux_rt_signal_handler = 0;
   p->linux_sigmask = 0;
   p->linux_brk = 0;
   p->linux_brk_limit = 0;
@@ -499,28 +503,36 @@ freeproc(struct proc *p)
   p->state = UNUSED;
 }
 
-void
-linux_interrupt(int pid, int deliver_sigcancel, int sender)
+int
+linux_interrupt(int tgid, int tid, int sig, int sender)
 {
   struct proc *p;
 
+  if(sig < 0 || sig > 64)
+    return -22; // EINVAL
+
   for(p = proc; p < &proc[NPROC]; p++){
     acquire(&p->lock);
-    if(p->pid == pid && p->state != UNUSED){
+    if(p->pid == tid && p->state != UNUSED){
+      if(tgid != 0 && linux_tgid(p) != tgid){
+        release(&p->lock);
+        return -3; // ESRCH
+      }
       p->linux_signal_pending = 1;
-      if(deliver_sigcancel && p->linux_in_signal == 0 &&
-         p->linux_sigcancel_handler &&
+      if(sig >= 32 && p->linux_in_signal == 0 &&
+         p->linux_rt_signal_handler &&
          p->linux_pending_signal == 0){
-        p->linux_pending_signal = 33;
+        p->linux_pending_signal = sig;
         p->linux_pending_sender = sender;
       }
       if(p->state == SLEEPING)
         p->state = RUNNABLE;
       release(&p->lock);
-      return;
+      return 0;
     }
     release(&p->lock);
   }
+  return -3; // ESRCH
 }
 
 static struct proc *
@@ -532,7 +544,7 @@ linux_thread_leader(struct proc *p)
 }
 
 void
-linux_set_sigcancel_handler(uint64 handler)
+linux_set_rt_signal_handler(uint64 handler)
 {
   struct proc *cur = myproc();
   struct proc *leader = linux_thread_leader(cur);
@@ -541,7 +553,7 @@ linux_set_sigcancel_handler(uint64 handler)
     if(p->state == UNUSED)
       continue;
     if(linux_thread_leader(p) == leader)
-      p->linux_sigcancel_handler = handler;
+      p->linux_rt_signal_handler = handler;
   }
 }
 
@@ -649,7 +661,7 @@ linux_deliver_signal(void)
   struct proc *p = myproc();
   int sig = p->linux_pending_signal;
 
-  if(sig == 0 || p->linux_sigcancel_handler == 0 || p->linux_in_signal)
+  if(sig == 0 || p->linux_rt_signal_handler == 0 || p->linux_in_signal)
     return;
 
   uint64 frame = (p->trapframe->sp -
@@ -686,7 +698,7 @@ linux_deliver_signal(void)
   p->trapframe->a2 = frame + LINUX_UCONTEXT_OFF;
   p->trapframe->ra = USIGRETURN;
   p->trapframe->sp = frame;
-  p->trapframe->epc = p->linux_sigcancel_handler;
+  p->trapframe->epc = p->linux_rt_signal_handler;
 }
 
 uint64
@@ -897,6 +909,7 @@ proc_freepagetable(pagetable_t pagetable, uint64 sz)
   uvmunmap(pagetable, TRAPFRAME, 1, 0);
   uvmunmap(pagetable, USYSCALL, 1, 0);
   uvmunmap(pagetable, USIGRETURN, 1, 0);
+  uvmunmap_all(pagetable);
   uvmfree(pagetable, sz);
 }
 
@@ -959,8 +972,9 @@ growproc(int n)
 // Create a new process, copying the parent.
 // Sets up child kernel stack to return as if from fork() system call.
 static int
-forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, int share_vm,
-       int share_files, int share_fs, int clone_thread)
+forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, uint64 set_parent_tid,
+       uint64 set_child_tid, int share_vm, int share_files, int share_fs,
+       int clone_thread)
 {
   int i, pid;
   struct proc *np;
@@ -993,6 +1007,22 @@ forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, int share_vm,
   if(tls != 0)
     np->trapframe->tp = tls;
   np->clear_child_tid = clear_child_tid;
+  if(set_parent_tid != 0){
+    int tid = pid;
+    if(copyout(p->pagetable, set_parent_tid, (char *)&tid, sizeof(tid)) < 0){
+      freeproc(np);
+      release(&np->lock);
+      return -1;
+    }
+  }
+  if(set_child_tid != 0){
+    int tid = pid;
+    if(copyout(np->pagetable, set_child_tid, (char *)&tid, sizeof(tid)) < 0){
+      freeproc(np);
+      release(&np->lock);
+      return -1;
+    }
+  }
 
   // increment reference counts on open file descriptors.
   for(i = 0; i < NOFILE; i++)
@@ -1012,7 +1042,7 @@ forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, int share_vm,
   np->linux_share_vm = share_vm;
   np->linux_share_files = share_files;
   np->linux_share_fs = share_fs;
-  np->linux_sigcancel_handler = p->linux_sigcancel_handler;
+  np->linux_rt_signal_handler = p->linux_rt_signal_handler;
   np->linux_sigmask = p->linux_sigmask;
   np->linux_brk = p->linux_brk;
   np->linux_brk_limit = p->linux_brk_limit;
@@ -1076,11 +1106,12 @@ forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, int share_vm,
 
 
 int
-kclone(uint64 stack, uint64 tls, uint64 clear_child_tid, int share_vm,
-       int share_files, int share_fs, int clone_thread)
+kclone(uint64 stack, uint64 tls, uint64 clear_child_tid, uint64 set_parent_tid,
+       uint64 set_child_tid, int share_vm, int share_files, int share_fs,
+       int clone_thread)
 {
-  return forkat(stack, tls, clear_child_tid, share_vm, share_files, share_fs,
-                clone_thread);
+  return forkat(stack, tls, clear_child_tid, set_parent_tid, set_child_tid,
+                share_vm, share_files, share_fs, clone_thread);
 }
 
 // Pass p's abandoned children to init.

@@ -96,7 +96,7 @@ struct vma {
 
 struct vfs_mount;
 
-struct proc_vfs_cwd {
+struct proc_vfs_path {
   struct vfs_mount *mount;
   char inner[MAXPATH];
   char abs_path[MAXPATH];
@@ -128,16 +128,19 @@ struct proc {
   int linux_pending_signal;    // Linux signal to deliver before user return
   int linux_pending_sender;    // Sender pid for pending Linux signal
   int linux_in_signal;         // currently running a Linux signal handler
+
+  //for clone
   int linux_share_vm;          // Linux CLONE_VM-style shared user memory
   int linux_share_files;       // Linux CLONE_FILES-style shared fd table
   int linux_share_fs;          // Linux CLONE_FS-style shared cwd/root state
+
   int linux_is_thread;         // Linux CLONE_THREAD-style task
   int linux_tgid;              // Linux thread-group id; pid for normal procs
   int linux_group_exiting;     // thread group is being torn down
   int linux_group_xstate;      // status supplied to exit_group
   int linux_thread_count;      // live tasks, meaningful on group leader
   struct proc *linux_group_leader; // leader of this Linux thread group
-  uint64 linux_sigcancel_handler; // handler installed for Linux SIGCANCEL
+  uint64 linux_rt_signal_handler; // handler installed for Linux rt signals
   uint64 linux_sigmask;        // Linux blocked signal mask
   uint64 linux_brk;            // Current Linux ABI program break
   uint64 linux_brk_limit;      // Highest Linux brk before the stack guard
@@ -148,8 +151,8 @@ struct proc {
   struct context context;      // swtch() here to run process
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
-  struct proc_vfs_cwd vfs_root;// Process root in VFS terms
-  struct proc_vfs_cwd vfs_cwd; // Current directory in VFS terms
+  struct proc_vfs_path vfs_root;// Process root in VFS terms
+  struct proc_vfs_path vfs_cwd; // Current directory in VFS terms
   char name[16];               // Process name (debugging)
   struct cpu *pincpu;
   uint64 mmap_base;            // next mmap allocation address (grows down)

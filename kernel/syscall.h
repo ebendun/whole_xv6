@@ -79,6 +79,7 @@
 #define SYS_execve    221
 #define SYS_mmap      222
 #define SYS_mprotect  226
+#define SYS_madvise   233
 #define SYS_wait4     260
 #define SYS_prlimit64 261
 #define SYS_renameat2 276

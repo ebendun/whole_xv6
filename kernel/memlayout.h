@@ -65,6 +65,7 @@
 //   fixed-size stack
 //   expandable heap
 //   ...
+//   USIGRETURN (user executable Linux rt_sigreturn stub)
 //   USYSCALL (shared with kernel)
 //   TRAPFRAME (p->trapframe, used by the trampoline)
 //   TRAMPOLINE (the same page as in the kernel)

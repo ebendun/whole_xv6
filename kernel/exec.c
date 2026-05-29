@@ -343,7 +343,7 @@ kexec(char *path, char **argv)
   p->linux_group_exiting = 0;
   p->linux_group_xstate = 0;
   p->linux_thread_count = 1;
-  p->linux_sigcancel_handler = 0;
+  p->linux_rt_signal_handler = 0;
   p->linux_sigmask = 0;
   p->clear_child_tid = 0;
   p->pincpu = is_ext4 ? &cpus[0] : 0;

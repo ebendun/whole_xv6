@@ -866,6 +866,27 @@ sys_munmap(void)
   return 0;
 }
 
+uint64
+sys_linux_madvise(void)
+{
+  // Keep mmap advice as a compatibility no-op.  libc uses this on thread
+  // stacks and arenas; ignoring the hint preserves the mapping contents.
+  uint64 addr, len;
+  int advice;
+
+  argaddr(0, &addr);
+  argaddr(1, &len);
+  argint(2, &advice);
+
+  if(len == 0)
+    return 0;
+  if((addr % PGSIZE) != 0 || addr + len < addr)
+    return -22; // EINVAL
+  if(advice < 0 || advice > 28)
+    return -22; // EINVAL
+  return 0;
+}
+
 static int
 linux_mprotect_one(struct proc *p, uint64 start, uint64 end, int prot)
 {

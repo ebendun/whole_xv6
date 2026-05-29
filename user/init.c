@@ -11,6 +11,7 @@
 
 char *shargv[] = { "/bin/sh", 0 };
 
+#ifndef NORMAL_BOOT
 struct test_entry {
   char *dir;
   char *script;
@@ -56,6 +57,7 @@ run_test(struct test_entry *test)
   }
   wait((int *)0);
 }
+#endif
 
 int
 main(void)
@@ -78,9 +80,11 @@ main(void)
   dup(0);  // stdout
   dup(0);  // stderr
 
+#ifndef NORMAL_BOOT
   for(struct test_entry *test = tests; test->script; test++)
     run_test(test);
   halt();
+#endif
 
   for(;;){
     printf("init: starting sh\n");

@@ -550,6 +550,32 @@ freewalk(pagetable_t pagetable)
   kfree((void*)pagetable);
 }
 
+static void
+uvmunmap_all_walk(pagetable_t pagetable, int level)
+{
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pagetable[i];
+
+    if((pte & PTE_V) == 0)
+      continue;
+    if((pte & (PTE_R|PTE_W|PTE_X)) == 0){
+      uvmunmap_all_walk((pagetable_t)PTE2PA(pte), level - 1);
+      continue;
+    }
+    if(level == 1)
+      superfree((void*)PTE2PA(pte));
+    else
+      kfree((void*)PTE2PA(pte));
+    pagetable[i] = 0;
+  }
+}
+
+void
+uvmunmap_all(pagetable_t pagetable)
+{
+  uvmunmap_all_walk(pagetable, 2);
+}
+
 // Free user memory pages,
 // then free page-table pages.
 void

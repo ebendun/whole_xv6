@@ -118,6 +118,7 @@ extern uint64 sys_linux_lseek(void);
 extern uint64 sys_linux_pread64(void);
 extern uint64 sys_linux_mmap(void);
 extern uint64 sys_linux_mprotect(void);
+extern uint64 sys_linux_madvise(void);
 extern uint64 sys_linux_newfstatat(void);
 extern uint64 sys_linux_brk(void);
 extern uint64 sys_linux_gettid(void);
@@ -266,6 +267,7 @@ static struct syscall_entry linux_syscalls[] = {
   {SYS_execve, sys_linux_execve},
   {SYS_mmap, sys_linux_mmap},
   {SYS_mprotect, sys_linux_mprotect},
+  {SYS_madvise, sys_linux_madvise},
   {SYS_wait4, sys_linux_wait4},
   {SYS_prlimit64, sys_linux_prlimit64},
   {SYS_statfs, sys_linux_statfs},
