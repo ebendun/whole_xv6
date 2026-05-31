@@ -102,6 +102,7 @@ int             kclone(uint64, uint64, uint64, uint64, uint64, int, int, int, in
 int             linux_tgid(struct proc *);
 void            linux_sync_file_table(struct proc *);
 void            linux_sync_vm_size(struct proc *);
+void            linux_mm_apply_to_proc(struct proc *);
 void            linux_futex_wake(uint64);
 int             linux_interrupt(int, int, int, int);
 void            linux_set_rt_signal_handler(uint64);
@@ -111,7 +112,7 @@ int             linux_take_interrupt(void);
 int             growproc(int);
 void            proc_mapstacks(pagetable_t);
 pagetable_t     proc_pagetable(struct proc *);
-void            proc_freepagetable(pagetable_t, uint64);
+void            proc_freepagetable(pagetable_t, uint64, uint64);
 int             kkill(int);
 int             killed(struct proc*);
 void            setkilled(struct proc*);

@@ -354,10 +354,18 @@ kexec(char *path, char **argv)
     vfs_set_proc_root(p, "/");
     p->linux_exe_path[0] = 0;
   }
-  p->mmap_base = USIGRETURN;
+  p->mmap_base = MMAP_TOP;
+  if(p->mm){
+    p->mm->pagetable = p->pagetable;
+    p->mm->sz = p->sz;
+    p->mm->linux_brk = p->linux_brk;
+    p->mm->linux_brk_limit = p->linux_brk_limit;
+    p->mm->mmap_base = p->mmap_base;
+    memset(p->mm->vmas, 0, sizeof(p->mm->vmas));
+  }
   p->trapframe->epc = entry;  // initial program counter
   p->trapframe->sp = sp; // initial stack pointer
-  proc_freepagetable(oldpagetable, oldsz);
+  proc_freepagetable(oldpagetable, oldsz, p->trapframe_va);
 
   // xv6 programs enter main(argc, argv). Linux ABI programs enter _start;
   // on RISC-V a0 is rtld_fini, so keep it null and let _start read argc
@@ -368,7 +376,7 @@ kexec(char *path, char **argv)
 
  bad:
   if(pagetable)
-    proc_freepagetable(pagetable, sz);
+    proc_freepagetable(pagetable, sz, p->trapframe_va);
   if(ef)
     fileclose(ef);
   if(interp_f)

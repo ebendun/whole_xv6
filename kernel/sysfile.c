@@ -682,8 +682,9 @@ sys_linux_close(void)
 static int
 linux_vma_slot(struct proc *p)
 {
+  struct linux_mm *mm = p->mm;
   for(int i = 0; i < NVMA; i++){
-    if(p->vmas[i].used == 0)
+    if(mm->vmas[i].used == 0)
       return i;
   }
   return -1;
@@ -692,15 +693,16 @@ linux_vma_slot(struct proc *p)
 static int
 linux_vma_overlaps(struct proc *p, uint64 addr, uint64 len)
 {
+  struct linux_mm *mm = p->mm;
   uint64 end = addr + len;
 
   if(end < addr)
     return 1;
   for(int i = 0; i < NVMA; i++){
-    if(p->vmas[i].used == 0)
+    if(mm->vmas[i].used == 0)
       continue;
-    uint64 vstart = p->vmas[i].addr;
-    uint64 vend = vstart + p->vmas[i].len;
+    uint64 vstart = mm->vmas[i].addr;
+    uint64 vend = vstart + mm->vmas[i].len;
     if(addr < vend && end > vstart)
       return 1;
   }
@@ -710,9 +712,10 @@ linux_vma_overlaps(struct proc *p, uint64 addr, uint64 len)
 static int
 linux_mmap_addr_ok(struct proc *p, uint64 addr, uint64 len)
 {
-  if(len == 0 || addr >= USYSCALL || addr + len < addr || addr + len > USYSCALL)
+  struct linux_mm *mm = p->mm;
+  if(len == 0 || addr >= MMAP_TOP || addr + len < addr || addr + len > MMAP_TOP)
     return 0;
-  if(addr < p->sz)
+  if(addr < mm->sz)
     return 0;
   if(addr < PGSIZE)
     return 0;
@@ -722,6 +725,7 @@ linux_mmap_addr_ok(struct proc *p, uint64 addr, uint64 len)
 static uint64
 linux_mmap_pick_addr(struct proc *p, uint64 hint, uint64 len)
 {
+  struct linux_mm *mm = p->mm;
   uint64 addr;
 
   if(hint != 0){
@@ -730,7 +734,7 @@ linux_mmap_pick_addr(struct proc *p, uint64 hint, uint64 len)
       return hint;
   }
 
-  addr = PGROUNDDOWN(p->mmap_base - len);
+  addr = PGROUNDDOWN(mm->mmap_base - len);
   while(linux_mmap_addr_ok(p, addr, len)){
     if(linux_vma_overlaps(p, addr, len) == 0)
       return addr;
@@ -746,6 +750,7 @@ linux_mmap_create(uint64 addr, uint64 len, int prot, int flags, int fd,
                   uint64 offset, int linux_abi)
 {
   struct proc *p = myproc();
+  struct linux_mm *mm = p->mm;
   struct file *f = 0;
   struct vfs_node node;
   int map_type = flags & (MAP_SHARED | MAP_PRIVATE);
@@ -796,17 +801,18 @@ linux_mmap_create(uint64 addr, uint64 len, int prot, int flags, int fd,
   if(slot < 0)
     return linux_abi ? -12 : -1; // ENOMEM
 
-  if(mapaddr < p->mmap_base)
-    p->mmap_base = mapaddr;
-  p->vmas[slot].used = 1;
-  p->vmas[slot].addr = mapaddr;
-  p->vmas[slot].len = maplen;
-  p->vmas[slot].filelen = anonymous ? 0 : node.size;
-  p->vmas[slot].prot = prot;
-  p->vmas[slot].flags = flags;
-  p->vmas[slot].offset = offset;
-  p->vmas[slot].f = anonymous ? 0 : filedup(f);
-  linux_share_vma_to_group(p, &p->vmas[slot]);
+  if(mapaddr < mm->mmap_base)
+    mm->mmap_base = mapaddr;
+  mm->vmas[slot].used = 1;
+  mm->vmas[slot].addr = mapaddr;
+  mm->vmas[slot].len = maplen;
+  mm->vmas[slot].filelen = anonymous ? 0 : node.size;
+  mm->vmas[slot].prot = prot;
+  mm->vmas[slot].flags = flags;
+  mm->vmas[slot].offset = offset;
+  mm->vmas[slot].f = anonymous ? 0 : filedup(f);
+  linux_mm_apply_to_proc(p);
+  linux_share_vma_to_group(p, &mm->vmas[slot]);
 
   return mapaddr;
 }
@@ -891,12 +897,14 @@ static int
 linux_mprotect_one(struct proc *p, uint64 start, uint64 end, int prot)
 {
   // Change protection for a subrange of one tracked VMA, splitting if needed.
+  struct linux_mm *mm = p->mm;
+
   for(int i = 0; i < NVMA; i++){
-    if(p->vmas[i].used == 0)
+    if(mm->vmas[i].used == 0)
       continue;
-    if(start >= p->vmas[i].addr &&
-       end <= p->vmas[i].addr + p->vmas[i].len){
-      struct vma old = p->vmas[i];
+    if(start >= mm->vmas[i].addr &&
+       end <= mm->vmas[i].addr + mm->vmas[i].len){
+      struct vma old = mm->vmas[i];
       int need = 0;
       if(start > old.addr)
         need++;
@@ -907,43 +915,43 @@ linux_mprotect_one(struct proc *p, uint64 start, uint64 end, int prot)
       for(int j = 0; j < need; j++){
         slots[j] = -1;
         for(int k = 0; k < NVMA; k++){
-          if(p->vmas[k].used == 0){
+          if(mm->vmas[k].used == 0){
             slots[j] = k;
-            p->vmas[k].used = -1;
+            mm->vmas[k].used = -1;
             break;
           }
         }
         if(slots[j] < 0){
           for(int k = 0; k < j; k++)
-            p->vmas[slots[k]].used = 0;
+            mm->vmas[slots[k]].used = 0;
           return -12; // ENOMEM
         }
       }
       for(int j = 0; j < need; j++)
-        p->vmas[slots[j]].used = 0;
+        mm->vmas[slots[j]].used = 0;
 
-      p->vmas[i] = old;
-      p->vmas[i].addr = start;
-      p->vmas[i].len = end - start;
-      p->vmas[i].offset = old.offset + (start - old.addr);
-      p->vmas[i].prot = prot;
+      mm->vmas[i] = old;
+      mm->vmas[i].addr = start;
+      mm->vmas[i].len = end - start;
+      mm->vmas[i].offset = old.offset + (start - old.addr);
+      mm->vmas[i].prot = prot;
 
       int s = 0;
       if(start > old.addr){
-        p->vmas[slots[s]] = old;
-        p->vmas[slots[s]].addr = old.addr;
-        p->vmas[slots[s]].len = start - old.addr;
-        if(p->vmas[slots[s]].f)
-          filedup(p->vmas[slots[s]].f);
+        mm->vmas[slots[s]] = old;
+        mm->vmas[slots[s]].addr = old.addr;
+        mm->vmas[slots[s]].len = start - old.addr;
+        if(mm->vmas[slots[s]].f)
+          filedup(mm->vmas[slots[s]].f);
         s++;
       }
       if(end < old.addr + old.len){
-        p->vmas[slots[s]] = old;
-        p->vmas[slots[s]].addr = end;
-        p->vmas[slots[s]].len = old.addr + old.len - end;
-        p->vmas[slots[s]].offset = old.offset + (end - old.addr);
-        if(p->vmas[slots[s]].f)
-          filedup(p->vmas[slots[s]].f);
+        mm->vmas[slots[s]] = old;
+        mm->vmas[slots[s]].addr = end;
+        mm->vmas[slots[s]].len = old.addr + old.len - end;
+        mm->vmas[slots[s]].offset = old.offset + (end - old.addr);
+        if(mm->vmas[slots[s]].f)
+          filedup(mm->vmas[slots[s]].f);
       }
       // Already-faulted pages need their PTE permissions updated immediately.
       for(uint64 a = start; a < end; a += PGSIZE){
@@ -964,6 +972,7 @@ linux_mprotect_one(struct proc *p, uint64 start, uint64 end, int prot)
           perm |= PTE_X;
         *pte = PA2PTE(pa) | perm | PTE_V;
       }
+      linux_mm_apply_to_proc(p);
       return 0;
     }
   }
@@ -1023,21 +1032,6 @@ sys_linux_mprotect(void)
      linux_mprotect_mapped_pages(p, start, end, prot) < 0)
     return -12; // ENOMEM
 
-  if(p->linux_share_vm){
-    for(struct proc *q = proc; q < &proc[NPROC]; q++){
-      if(q == p)
-        continue;
-      acquire(&q->lock);
-      if(q->state == UNUSED || q->state == ZOMBIE || q->pagetable == 0){
-        release(&q->lock);
-        continue;
-      }
-      if(linux_tgid(q) == linux_tgid(p) &&
-         linux_mprotect_one(q, start, end, prot) < 0)
-        linux_mprotect_mapped_pages(q, start, end, prot);
-      release(&q->lock);
-    }
-  }
   return 0;
 }
 

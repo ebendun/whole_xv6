@@ -69,9 +69,10 @@ usertrap(void)
     syscall();
   } else if((which_dev = devintr()) != 0){
     // ok
-  } else if((r_scause() == 15 || r_scause() == 13) &&
-            vmfault(p->pagetable, r_stval(), (r_scause() == 13)? 1 : 0) != 0) {
-    // page fault on lazily-allocated page
+  } else if((r_scause() == 15 || r_scause() == 13 || r_scause() == 12) &&
+            vmfault(p->pagetable, r_stval(),
+                    r_scause() == 15 ? 0 : (r_scause() == 13 ? 1 : 2)) != 0) {
+    // page fault on lazily-allocated data or executable page
   } else {
     printf("usertrap(): unexpected scause 0x%lx pid=%d\n", r_scause(), p->pid);
     printf("            sepc=0x%lx stval=0x%lx\n", r_sepc(), r_stval());
@@ -145,6 +146,8 @@ prepare_return(void)
 
   // set S Exception Program Counter to the saved user pc.
   w_sepc(p->trapframe->epc);
+  //it will be used in trampoline.s'a0 register
+  w_sscratch(p->trapframe_va);
 }
 
 // interrupts and exceptions from kernel code go here via kernelvec,

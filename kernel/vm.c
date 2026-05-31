@@ -21,109 +21,6 @@ extern char etext[];  // kernel.ld sets this to end of kernel code.
 extern char trampoline[]; // trampoline.S
 extern struct proc proc[NPROC];
 
-static int
-linux_same_vm_group(struct proc *a, struct proc *b)
-{
-  if(a == 0 || b == 0)
-    return 0;
-  return linux_tgid(a) == linux_tgid(b);
-}
-
-static int
-linux_addr_in_proc(struct proc *p, uint64 a)
-{
-  if(a < p->sz)
-    return 1;
-  for(int i = 0; i < NVMA; i++){
-    if(p->vmas[i].used &&
-       a >= p->vmas[i].addr &&
-       a < p->vmas[i].addr + p->vmas[i].len)
-      return 1;
-  }
-  return 0;
-}
-
-static uint64
-linux_shared_fault_page(struct proc *p, uint64 a, int *perm)
-{
-  for(struct proc *q = proc; q < &proc[NPROC]; q++){
-    if(q == p)
-      continue;
-    acquire(&q->lock);
-    if(q->state == UNUSED || q->state == ZOMBIE || q->pagetable == 0){
-      release(&q->lock);
-      continue;
-    }
-    if(!linux_same_vm_group(p, q))
-    {
-      release(&q->lock);
-      continue;
-    }
-    pte_t *pte = walk(q->pagetable, a, 0);
-    if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0){
-      release(&q->lock);
-      continue;
-    }
-    *perm = PTE_FLAGS(*pte);
-    uint64 pa = PTE2PA(*pte);
-    release(&q->lock);
-    return pa;
-  }
-  return 0;
-}
-
-static void
-linux_map_fault_page_to_group(struct proc *p, uint64 a, uint64 pa, int perm)
-{
-  for(struct proc *q = proc; q < &proc[NPROC]; q++){
-    if(q == p)
-      continue;
-    acquire(&q->lock);
-    if(q->state == UNUSED || q->state == ZOMBIE || q->pagetable == 0){
-      release(&q->lock);
-      continue;
-    }
-    if(!linux_same_vm_group(p, q) || !linux_addr_in_proc(q, a))
-    {
-      release(&q->lock);
-      continue;
-    }
-    if(walkaddr(q->pagetable, a) == 0 &&
-       mappages(q->pagetable, a, PGSIZE, pa, perm) == 0)
-      kref_inc(pa);
-    release(&q->lock);
-  }
-}
-
-static void
-linux_replace_cow_page_in_group(struct proc *p, uint64 a, uint64 oldpa,
-                                uint64 newpa, int perm)
-{
-  for(struct proc *q = proc; q < &proc[NPROC]; q++){
-    acquire(&q->lock);
-    if(q->state == UNUSED || q->state == ZOMBIE || q->pagetable == 0){
-      release(&q->lock);
-      continue;
-    }
-    if(!linux_same_vm_group(p, q))
-    {
-      release(&q->lock);
-      continue;
-    }
-    pte_t *qpte = walk(q->pagetable, a, 0);
-    if(qpte == 0 || (*qpte & PTE_V) == 0 || PTE2PA(*qpte) != oldpa){
-      release(&q->lock);
-      continue;
-    }
-    *qpte = PA2PTE(newpa) | perm;
-    if(q != p)
-      kref_inc(newpa);
-    kfree((void *)oldpa);
-    release(&q->lock);
-  }
-  sfence_vma();
-}
-
 // Make a direct-map page table for the kernel.
 pagetable_t
 kvmmake(void)
@@ -881,6 +778,7 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
   pte_t *pte;
   int level = 0;
   struct proc *p = myproc();
+  struct linux_mm *mm = p->mm;
   
   struct vma *v = 0;
   uint64 a = PGROUNDDOWN(va);
@@ -948,10 +846,6 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
       memmove((void *)mem, (void *)pa, PGSIZE);
       uint flags = PTE_FLAGS(*pte);
       flags = (flags | PTE_W) & ~PTE_COW;
-      if(p->linux_share_vm){
-        linux_replace_cow_page_in_group(p, va, pa, mem, flags);
-        return mem;
-      }
       *pte = PA2PTE(mem) | flags;
       sfence_vma();
       kfree((void *)pa);
@@ -959,10 +853,10 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
     }
     if(!read && ((*pte & PTE_W) == 0)){
       for(int i = 0; i < NVMA; i++){
-        if(p->vmas[i].used &&
-           a >= p->vmas[i].addr &&
-           a < p->vmas[i].addr + p->vmas[i].len &&
-           (p->vmas[i].prot & PROT_WRITE)){
+        if(mm->vmas[i].used &&
+           a >= mm->vmas[i].addr &&
+           a < mm->vmas[i].addr + mm->vmas[i].len &&
+           (mm->vmas[i].prot & PROT_WRITE)){
           *pte = *pte | PTE_W;
           sfence_vma();
           return PTE2PA(*pte);
@@ -976,19 +870,22 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
   }
 
   for(int i = 0; i < NVMA; i++){
-    if(p->vmas[i].used == 0)
+    if(mm->vmas[i].used == 0)
       continue;
-    if(a >= p->vmas[i].addr && a < p->vmas[i].addr + p->vmas[i].len){
-      v = &p->vmas[i];
+    if(a >= mm->vmas[i].addr && a < mm->vmas[i].addr + mm->vmas[i].len){
+      v = &mm->vmas[i];
       break;
     }
   }
 
   if(v){
-    if(read && (v->prot & PROT_READ) == 0){
+    if(read == 1 && (v->prot & PROT_READ) == 0){
       return 0;
     }
-    if(!read && (v->prot & PROT_WRITE) == 0){
+    if(read == 0 && (v->prot & PROT_WRITE) == 0){
+      return 0;
+    }
+    if(read == 2 && (v->prot & PROT_EXEC) == 0){
       return 0;
     }
 
@@ -999,17 +896,6 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
       perm |= PTE_W;
     if(v->prot & PROT_EXEC)
       perm |= PTE_X;
-
-    if(p->linux_share_vm){
-      int shared_perm = 0;
-      uint64 shared = linux_shared_fault_page(p, a, &shared_perm);
-      if(shared != 0){
-        if(mappages(p->pagetable, a, PGSIZE, shared, shared_perm) != 0)
-          return 0;
-        kref_inc(shared);
-        return shared;
-      }
-    }
 
     mem = (uint64)kalloc();
     if(mem == 0)
@@ -1025,28 +911,20 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
       }
     }
 
+    pte = walk(p->pagetable, a, 0);
+    if(pte && (*pte & PTE_V)){
+      kfree((void*)mem);
+      return PTE2PA(*pte);
+    }
     if(mappages(p->pagetable, a, PGSIZE, mem, perm) != 0){
       kfree((void*)mem);
       return 0;
     }
-    if(p->linux_share_vm)
-      linux_map_fault_page_to_group(p, a, mem, perm);
     return mem;
   }
 
-  if(a >= p->sz){
+  if(a >= mm->sz){
     return 0;
-  }
-
-  if(p->linux_share_vm){
-    int shared_perm = 0;
-    uint64 shared = linux_shared_fault_page(p, a, &shared_perm);
-    if(shared != 0){
-      if(mappages(p->pagetable, a, PGSIZE, shared, shared_perm) != 0)
-        return 0;
-      kref_inc(shared);
-      return shared;
-    }
   }
 
   mem = (uint64)kalloc();
@@ -1058,8 +936,6 @@ vmfault(pagetable_t pagetable, uint64 va, int read)
     kfree((void*)mem);
     return 0;
   }
-  if(p->linux_share_vm)
-    linux_map_fault_page_to_group(p, a, mem, PTE_W|PTE_U|PTE_R);
   return mem;
 }
 

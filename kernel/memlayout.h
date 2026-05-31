@@ -65,13 +65,15 @@
 //   fixed-size stack
 //   expandable heap
 //   ...
-//   USIGRETURN (user executable Linux rt_sigreturn stub)
-//   USYSCALL (shared with kernel)
-//   TRAPFRAME (p->trapframe, used by the trampoline)
+//   per-thread trapframe slots
+//   USIGRETURN (shared user executable Linux rt_sigreturn stub)
 //   TRAMPOLINE (the same page as in the kernel)
-#define TRAPFRAME (TRAMPOLINE - PGSIZE)
-#define USYSCALL (TRAPFRAME - PGSIZE)
-#define USIGRETURN (USYSCALL - PGSIZE)
+#define USIGRETURN (TRAMPOLINE - PGSIZE)
+#define TRAPFRAME_BASE (USIGRETURN - PGSIZE)
+#define TRAPFRAME_SLOT(i) (TRAPFRAME_BASE - ((i) * PGSIZE))
+#define TRAPFRAME TRAPFRAME_SLOT(0)
+#define TRAPFRAME_SLOTS NPROC
+#define MMAP_TOP TRAPFRAME_SLOT(TRAPFRAME_SLOTS)
 
 #ifndef __ASSEMBLER__
 struct usyscall {

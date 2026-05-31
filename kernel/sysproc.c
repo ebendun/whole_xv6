@@ -325,7 +325,7 @@ sys_sbrk(void)
 
   argint(0, &n);
   argint(1, &t);
-  addr = myproc()->sz;
+  addr = myproc()->mm->sz;
 
   if(t == SBRK_EAGER || n < 0) {
     if(growproc(n) < 0) {
@@ -337,7 +337,10 @@ sys_sbrk(void)
     // memory, vmfault() will allocate it.
     if(addr + n < addr)
       return -1;
-    myproc()->sz += n;
+    acquire(&myproc()->mm->lock);
+    myproc()->mm->sz += n;
+    release(&myproc()->mm->lock);
+    linux_mm_apply_to_proc(myproc());
     linux_sync_vm_size(myproc());
   }
   return addr;
@@ -348,24 +351,44 @@ sys_linux_brk(void)
 {
   // Linux brk sets the process break and returns the current break on failure.
   uint64 addr;
+  uint64 ret;
   struct proc *p = myproc();
+  struct linux_mm *mm = p->mm;
 
   argaddr(0, &addr);
-  if(p->linux_brk == 0)
-    p->linux_brk = p->sz;
-  if(addr == 0)
-    return p->linux_brk;
-  if(addr < p->linux_brk)
-    return p->linux_brk;
-  if(p->linux_brk_limit && addr >= p->linux_brk_limit)
-    return p->linux_brk;
-  if(addr > p->sz){
-    if(growproc(addr - p->sz) < 0)
-      return p->linux_brk;
+  acquire(&mm->lock);
+  if(mm->linux_brk == 0)
+    mm->linux_brk = mm->sz;
+  if(addr == 0){
+    uint64 brk = mm->linux_brk;
+    release(&mm->lock);
+    return brk;
   }
-  p->linux_brk = addr;
+  if(addr < mm->linux_brk){
+    uint64 brk = mm->linux_brk;
+    release(&mm->lock);
+    return brk;
+  }
+  if(mm->linux_brk_limit && addr >= mm->linux_brk_limit){
+    uint64 brk = mm->linux_brk;
+    release(&mm->lock);
+    return brk;
+  }
+  if(PGROUNDUP(addr) > mm->sz){
+    uint64 sz = uvmalloc(p->pagetable, mm->sz, PGROUNDUP(addr), PTE_W);
+    if(sz == 0){
+      uint64 brk = mm->linux_brk;
+      release(&mm->lock);
+      return brk;
+    }
+    mm->sz = sz;
+  }
+  mm->linux_brk = addr;
+  ret = mm->linux_brk;
+  release(&mm->lock);
+  linux_mm_apply_to_proc(p);
   linux_sync_vm_size(p);
-  return p->linux_brk;
+  return ret;
 }
 
 uint64
@@ -401,7 +424,46 @@ sys_linux_set_tid_address(void)
 uint64
 sys_linux_set_robust_list(void)
 {
-  // Stub: pthreads calls this, but robust futex owner-death is not implemented.
+  uint64 head;
+  uint64 len;
+
+  argaddr(0, &head);
+  argaddr(1, &len);
+  myproc()->robust_list = head;
+  myproc()->robust_list_len = len;
+  return 0;
+}
+
+uint64
+sys_linux_get_robust_list(void)
+{
+  int pid;
+  uint64 headp;
+  uint64 lenp;
+  struct proc *target = myproc();
+
+  argint(0, &pid);
+  argaddr(1, &headp);
+  argaddr(2, &lenp);
+
+  if(pid != 0 && pid != myproc()->pid){
+    target = 0;
+    for(struct proc *p = proc; p < &proc[NPROC]; p++){
+      if(p->pid == pid && p->state != UNUSED){
+        target = p;
+        break;
+      }
+    }
+    if(target == 0)
+      return -3; // ESRCH
+  }
+
+  if(copyout(myproc()->pagetable, headp, (char *)&target->robust_list,
+             sizeof(target->robust_list)) < 0)
+    return -14; // EFAULT
+  if(copyout(myproc()->pagetable, lenp, (char *)&target->robust_list_len,
+             sizeof(target->robust_list_len)) < 0)
+    return -14; // EFAULT
   return 0;
 }
 

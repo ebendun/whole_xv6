@@ -125,6 +125,7 @@ extern uint64 sys_linux_gettid(void);
 extern uint64 sys_linux_getppid(void);
 extern uint64 sys_linux_set_tid_address(void);
 extern uint64 sys_linux_set_robust_list(void);
+extern uint64 sys_linux_get_robust_list(void);
 extern uint64 sys_linux_uname(void);
 extern uint64 sys_linux_getrandom(void);
 extern uint64 sys_linux_exit_group(void);
@@ -181,6 +182,12 @@ sys_linux_success(void)
   return 0;
 }
 
+static uint64
+sys_linux_enosys(void)
+{
+  return -38;
+}
+
 struct syscall_entry {
   int num;
   uint64 (*fn)(void);
@@ -223,7 +230,7 @@ static struct syscall_entry linux_syscalls[] = {
   {SYS_set_tid_address, sys_linux_set_tid_address},
   {SYS_futex, sys_linux_futex},
   {SYS_set_robust_list, sys_linux_set_robust_list},
-  {SYS_get_robust_list, sys_linux_success},
+  {SYS_get_robust_list, sys_linux_get_robust_list},
   {SYS_nanosleep, sys_linux_nanosleep},
   {SYS_clock_gettime, sys_linux_clock_gettime},
   {SYS_clock_nanosleep, sys_linux_clock_nanosleep},
@@ -263,6 +270,7 @@ static struct syscall_entry linux_syscalls[] = {
   {SYS_setsockopt, sys_linux_setsockopt},
   {SYS_brk, sys_linux_brk},
   {SYS_munmap, sys_munmap},
+  {SYS_mremap, sys_linux_enosys},
   {SYS_clone, sys_linux_clone},
   {SYS_execve, sys_linux_execve},
   {SYS_mmap, sys_linux_mmap},

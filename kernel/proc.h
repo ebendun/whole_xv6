@@ -96,6 +96,17 @@ struct vma {
 
 struct vfs_mount;
 
+struct linux_mm {
+  struct spinlock lock;
+  int refcnt;
+  pagetable_t pagetable;
+  uint64 sz;
+  uint64 linux_brk;
+  uint64 linux_brk_limit;
+  uint64 mmap_base;
+  struct vma vmas[NVMA];
+};
+
 struct proc_vfs_path {
   struct vfs_mount *mount;
   char inner[MAXPATH];
@@ -145,8 +156,10 @@ struct proc {
   uint64 linux_brk;            // Current Linux ABI program break
   uint64 linux_brk_limit;      // Highest Linux brk before the stack guard
   char linux_exe_path[MAXPATH]; // Absolute Linux-visible executable path
+  struct linux_mm *mm;          // Linux-style shared address space metadata
   pagetable_t pagetable;       // User page table
   struct trapframe *trapframe; // data page for trampoline.S
+  uint64 trapframe_va;         // per-thread trapframe slot in the user page table
   char *sigreturn;             // user executable rt_sigreturn stub
   struct context context;      // swtch() here to run process
   struct file *ofile[NOFILE];  // Open files
@@ -158,6 +171,8 @@ struct proc {
   uint64 mmap_base;            // next mmap allocation address (grows down)
   struct vma vmas[NVMA];
   uint64 clear_child_tid;      // Linux CLONE_CHILD_CLEARTID futex address
+  uint64 robust_list;          // Linux robust futex list head
+  uint64 robust_list_len;      // Length supplied to set_robust_list
   
   //for page tables lab
   struct usyscall *usyscall;   // shared user/kernel page

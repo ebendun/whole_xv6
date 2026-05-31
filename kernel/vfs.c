@@ -167,6 +167,52 @@ vfs_linux_passthrough_abs(char *path)
 }
 
 static int
+vfs_linux_lib_probe(char *root, char *subdir, char *path, char *out, int outsz)
+{
+  char prefix[MAXPATH];
+  struct vfs_path vp;
+
+  snprintf(prefix, sizeof(prefix), "%s/%s", root, subdir);
+  snprintf(out, outsz, "%s%s", prefix, path);
+  if(vfs_resolve(out, &vp) == 0)
+    return 1;
+
+  if(strncmp(path, "/lib/ld-musl-", 13) == 0 && strncmp(subdir, "musl", 5) == 0){
+    snprintf(out, outsz, "%s/musl/lib/libc.so", root);
+    if(vfs_resolve(out, &vp) == 0)
+      return 1;
+  }
+  return 0;
+}
+
+static int
+vfs_linux_lib_path(struct proc *p, char *path, char *out, int outsz)
+{
+  char *root;
+
+  if(p == 0)
+    return 0;
+  root = p->vfs_root.abs_path;
+  if(root == 0 || path == 0 || out == 0 || outsz <= 0)
+    return 0;
+  if((strncmp(path, "/lib/", 5) != 0 &&
+      strncmp(path, "/usr/lib/", 9) != 0) ||
+     root[0] == 0)
+    return 0;
+
+  if(strncmp(p->linux_exe_path, "/musl/", 6) == 0){
+    if(vfs_linux_lib_probe(root, "musl", path, out, outsz))
+      return 1;
+    return vfs_linux_lib_probe(root, "glibc", path, out, outsz);
+  }
+  if(vfs_linux_lib_probe(root, "glibc", path, out, outsz))
+    return 1;
+  if(vfs_linux_lib_probe(root, "musl", path, out, outsz))
+    return 1;
+  return 0;
+}
+
+static int
 vfs_copy_root_mounts(uint64 dirp, int nread, int n, uint64 dirsize, uint64 *offp)
 {
   int seen = 0;
@@ -1632,6 +1678,8 @@ vfs_resolve_proc_path(struct proc *p, char *path, struct vfs_path *out)
       return vfs_resolve(path, out);
     if(vfs_linux_passthrough_abs(path))
       return vfs_resolve(path, out);
+    if(vfs_linux_lib_path(p, path, abs, sizeof(abs)))
+      return vfs_resolve(abs, out);
     snprintf(abs, sizeof(abs), "%s%s", p->vfs_root.abs_path, path);
     return vfs_resolve(abs, out);
   }

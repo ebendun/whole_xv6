@@ -75,6 +75,7 @@
 #define SYS_setsockopt 208
 #define SYS_brk       214
 #define SYS_munmap    215
+#define SYS_mremap    216
 #define SYS_clone     220
 #define SYS_execve    221
 #define SYS_mmap      222

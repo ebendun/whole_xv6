@@ -18,6 +18,7 @@ struct proc *initproc;
 
 int nextpid = 1;
 struct spinlock pid_lock;
+extern char trampoline[]; // trampoline.S
 
 extern void forkret(void);
 static void freeproc(struct proc *p);
@@ -76,6 +77,57 @@ linux_clear_child_tid(struct proc *p)
 }
 
 static void
+linux_handle_robust_list(struct proc *p)
+{
+  struct {
+    uint64 next;
+    long futex_offset;
+    uint64 pending;
+  } head;
+  uint64 entry;
+  uint64 seen = 0;
+
+  if(p->robust_list == 0)
+    return;
+  if(copyin(p->pagetable, (char *)&head, p->robust_list, sizeof(head)) < 0)
+    return;
+
+  entry = head.next;
+  while(entry && entry != p->robust_list && seen++ < 2048){
+    uint64 next = 0;
+    if(copyin(p->pagetable, (char *)&next, entry, sizeof(next)) < 0)
+      break;
+
+    uint64 uaddr = entry + head.futex_offset;
+    uint64 pa = walkaddr(p->pagetable, uaddr);
+    if(pa){
+      int val;
+      memmove(&val, (void *)pa, sizeof(val));
+      if((val & 0x3fffffff) == p->pid){
+        val = (val & ~0x3fffffff) | 0x40000000;
+        memmove((void *)pa, &val, sizeof(val));
+        linux_futex_wake(uaddr);
+      }
+    }
+    entry = next;
+  }
+
+  if(head.pending){
+    uint64 uaddr = head.pending + head.futex_offset;
+    uint64 pa = walkaddr(p->pagetable, uaddr);
+    if(pa){
+      int val;
+      memmove(&val, (void *)pa, sizeof(val));
+      if((val & 0x3fffffff) == p->pid){
+        val = (val & ~0x3fffffff) | 0x40000000;
+        memmove((void *)pa, &val, sizeof(val));
+        linux_futex_wake(uaddr);
+      }
+    }
+  }
+}
+
+static void
 linux_drop_vma_refs(struct proc *p)
 {
   for(int i = 0; i < NVMA; i++){
@@ -86,57 +138,31 @@ linux_drop_vma_refs(struct proc *p)
 }
 
 static int
-linux_proc_has_vma(struct proc *p, uint64 a)
+proc_pagetable_shared(struct proc *p)
 {
-  for(int i = 0; i < NVMA; i++){
-    if(p->vmas[i].used &&
-       a >= p->vmas[i].addr &&
-       a < p->vmas[i].addr + p->vmas[i].len)
+  for(struct proc *q = proc; q < &proc[NPROC]; q++){
+    if(q == p || q->state == UNUSED || q->pagetable == 0)
+      continue;
+    if(q->pagetable == p->pagetable)
       return 1;
   }
   return 0;
 }
 
 static void
-linux_preserve_thread_vma_pages(struct proc *p)
+proc_free_userpagetable(struct proc *p)
 {
-  for(int i = 0; i < NVMA; i++){
-    if(p->vmas[i].used == 0)
-      continue;
-    for(uint64 a = p->vmas[i].addr;
-        a < p->vmas[i].addr + PGROUNDUP(p->vmas[i].len);
-        a += PGSIZE){
-      pte_t *pte = walk(p->pagetable, a, 0);
-      if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
-        continue;
+  if(p->pagetable == 0)
+    return;
 
-      uint64 pa = PTE2PA(*pte);
-      uint flags = PTE_FLAGS(*pte);
-      for(struct proc *q = proc; q < &proc[NPROC]; q++){
-        if(q == p || q->state == UNUSED || q->state == ZOMBIE ||
-           q->pagetable == 0)
-          continue;
-        if(!linux_same_thread_group(p, q) || !linux_proc_has_vma(q, a))
-          continue;
-        if(walkaddr(q->pagetable, a) != 0)
-          break;
-        if(mappages(q->pagetable, a, PGSIZE, pa, flags) == 0)
-          kref_inc(pa);
-        break;
-      }
-    }
+  if(proc_pagetable_shared(p)){
+    if(p->trapframe_va)
+      //only delete the trapframe page
+      uvmunmap(p->pagetable, p->trapframe_va, 1, 0);
+  } else {
+    proc_freepagetable(p->pagetable, p->sz, p->trapframe_va);
   }
-}
-
-static void
-linux_unmap_thread_vmas(struct proc *p)
-{
-  for(int i = 0; i < NVMA; i++){
-    if(p->vmas[i].used == 0)
-      continue;
-    uvmunmap(p->pagetable, p->vmas[i].addr,
-             PGROUNDUP(p->vmas[i].len) / PGSIZE, 1);
-  }
+  p->pagetable = 0;
 }
 
 static void
@@ -196,14 +222,13 @@ linux_sync_vm_size(struct proc *src)
   if(src == 0 || src->linux_share_vm == 0)
     return;
 
+  linux_mm_apply_to_proc(src);
   for(struct proc *q = proc; q < &proc[NPROC]; q++){
     if(q == src || q->state == UNUSED)
       continue;
     if(!linux_same_thread_group(src, q))
       continue;
-    q->sz = src->sz;
-    q->linux_brk = src->linux_brk;
-    q->linux_brk_limit = src->linux_brk_limit;
+    linux_mm_apply_to_proc(q);
   }
 }
 
@@ -230,27 +255,72 @@ copy_mapped_vma_pages(struct proc *src, struct proc *dst)
   return 0;
 }
 
-static int
-share_mapped_vma_pages(struct proc *src, struct proc *dst)
+static struct linux_mm *
+linux_mm_alloc(void)
 {
-  for(int i = 0; i < NVMA; i++){
-    if(src->vmas[i].used == 0)
-      continue;
-    for(uint64 a = src->vmas[i].addr; a < src->vmas[i].addr + src->vmas[i].len; a += PGSIZE){
-      pte_t *pte = walk(src->pagetable, a, 0);
-      if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
-        continue;
-      uint64 pa = PTE2PA(*pte);
-      uint flags = PTE_FLAGS(*pte);
-      if(mappages(dst->pagetable, a, PGSIZE, pa, flags) != 0)
-        return -1;
-      kref_inc(pa);
-    }
-  }
-  return 0;
+  struct linux_mm *mm = (struct linux_mm *)kalloc();
+  if(mm == 0)
+    return 0;
+  memset(mm, 0, PGSIZE);
+  initlock(&mm->lock, "linuxmm");
+  mm->refcnt = 1;
+  mm->mmap_base = MMAP_TOP;
+  return mm;
 }
 
-extern char trampoline[]; // trampoline.S
+static void
+linux_mm_get(struct linux_mm *mm)
+{
+  acquire(&mm->lock);
+  mm->refcnt++;
+  release(&mm->lock);
+}
+
+static int
+linux_mm_put(struct linux_mm *mm)
+{
+  int last;
+
+  acquire(&mm->lock);
+  if(mm->refcnt < 1)
+    panic("linux_mm_put");
+  mm->refcnt--;
+  last = mm->refcnt == 0;
+  release(&mm->lock);
+  return last;
+}
+
+static void
+linux_mm_free(struct linux_mm *mm)
+{
+  kfree(mm);
+}
+
+static void
+linux_mm_snapshot_from_proc(struct proc *p)
+{
+  if(p->mm == 0)
+    return;
+  p->mm->pagetable = p->pagetable;
+  p->mm->sz = p->sz;
+  p->mm->linux_brk = p->linux_brk;
+  p->mm->linux_brk_limit = p->linux_brk_limit;
+  p->mm->mmap_base = p->mmap_base;
+  memmove(p->mm->vmas, p->vmas, sizeof(p->vmas));
+}
+
+void
+linux_mm_apply_to_proc(struct proc *p)
+{
+  if(p->mm == 0)
+    return;
+  p->pagetable = p->mm->pagetable;
+  p->sz = p->mm->sz;
+  p->linux_brk = p->mm->linux_brk;
+  p->linux_brk_limit = p->mm->linux_brk_limit;
+  p->mmap_base = p->mm->mmap_base;
+  memmove(p->vmas, p->mm->vmas, sizeof(p->vmas));
+}
 
 // helps ensure that wakeups of wait()ing
 // parents are not lost. helps obey the
@@ -369,7 +439,8 @@ found:
   safestrcpy(p->vfs_cwd.inner, "/", sizeof(p->vfs_cwd.inner));
   safestrcpy(p->vfs_cwd.abs_path, "/", sizeof(p->vfs_cwd.abs_path));
   
-  p->mmap_base = USIGRETURN;
+  p->trapframe_va = TRAPFRAME_SLOT(p - proc);
+  p->mmap_base = MMAP_TOP;
   p->is_linux = 0;
   p->linux_brk = 0;
   p->linux_brk_limit = 0;
@@ -390,6 +461,14 @@ found:
   p->linux_sigmask = 0;
   p->linux_exe_path[0] = 0;
   memset(p->vmas, 0, sizeof(p->vmas));
+  p->robust_list = 0;
+  p->robust_list_len = 0;
+  p->mm = linux_mm_alloc();
+  if(p->mm == 0){
+    freeproc(p);
+    release(&p->lock);
+    return 0;
+  }
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -398,13 +477,7 @@ found:
     return 0;
   }
 
-  if((p->usyscall = (struct usyscall *)kalloc()) == 0){
-    freeproc(p);
-    release(&p->lock);
-    return 0;
-  }
-  memset(p->usyscall, 0, PGSIZE);
-  p->usyscall->pid = p->pid;
+  p->usyscall = 0;
   p->pincpu = 0;
 
   if((p->sigreturn = kalloc()) == 0){
@@ -423,6 +496,7 @@ found:
     release(&p->lock);
     return 0;
   }
+  linux_mm_snapshot_from_proc(p);
 
   memset(&p->alarm_trapframe, 0, sizeof(p->alarm_trapframe));
   p->alarm_interval = 0;
@@ -454,9 +528,13 @@ freeproc(struct proc *p)
   if(p->sigreturn)
     kfree(p->sigreturn);
   p->sigreturn = 0;
-  if(p->pagetable)
-    proc_freepagetable(p->pagetable, p->sz);
-  p->pagetable = 0;
+  proc_free_userpagetable(p);
+  if(p->mm){
+    if(linux_mm_put(p->mm))
+      linux_mm_free(p->mm);
+    p->mm = 0;
+  }
+  p->trapframe_va = 0;
   p->sz = 0;
   p->is_linux = 0;
   p->linux_signal_pending = 0;
@@ -477,6 +555,8 @@ freeproc(struct proc *p)
   p->linux_brk = 0;
   p->linux_brk_limit = 0;
   p->linux_exe_path[0] = 0;
+  p->robust_list = 0;
+  p->robust_list_len = 0;
   p->pid = 0;
   p->parent = 0;
   p->name[0] = 0;
@@ -764,62 +844,72 @@ vmawriteback(struct proc *p, struct vma *v, uint64 addr, uint64 len)
 int
 proc_munmap(struct proc *p, uint64 addr, uint64 len)
 {
+  struct linux_mm *mm = p->mm;
+  uint64 target_end;
+
   if(len == 0 || (addr % PGSIZE) != 0 || (len % PGSIZE) != 0)
     return -1;
+  if(addr + len < addr)
+    return -1;
 
-  while(len > 0){
+  target_end = addr + len;
+  while(addr < target_end){
     struct vma *v = 0;
     for(int i = 0; i < NVMA; i++){
-      if(p->vmas[i].used == 0)
+      if(mm->vmas[i].used == 0)
         continue;
-      uint64 start = p->vmas[i].addr;
-      uint64 end = start + p->vmas[i].len;
-      if(addr >= start && addr < end){
-        v = &p->vmas[i];
+      uint64 start = mm->vmas[i].addr;
+      uint64 end = start + mm->vmas[i].len;
+      if(addr < end && target_end > start){
+        v = &mm->vmas[i];
         break;
       }
     }
     if(v == 0)
-      return -1;
+      break;
 
     uint64 vend = v->addr + v->len;
     uint64 old_addr = v->addr;
     uint64 old_offset = v->offset;
-    uint64 n = len;
-    if(addr + n > vend)
-      n = vend - addr;
-    if(addr != v->addr && addr + n != vend){
+    uint64 unmap_start = addr > v->addr ? addr : v->addr;
+    uint64 unmap_end = target_end < vend ? target_end : vend;
+    uint64 n = unmap_end - unmap_start;
+    if(n == 0){
+      addr = vend;
+      continue;
+    }
+    if(unmap_start != v->addr && unmap_end != vend){
       int slot = -1;
       for(int i = 0; i < NVMA; i++){
-        if(p->vmas[i].used == 0){
+        if(mm->vmas[i].used == 0){
           slot = i;
           break;
         }
       }
       if(slot < 0)
         return -1;
-      p->vmas[slot] = *v;
-      p->vmas[slot].addr = addr + n;
-      p->vmas[slot].offset = old_offset + (addr + n - old_addr);
-      p->vmas[slot].len = vend - (addr + n);
-      if(p->vmas[slot].filelen > addr + n - old_addr)
-        p->vmas[slot].filelen -= addr + n - old_addr;
+      mm->vmas[slot] = *v;
+      mm->vmas[slot].addr = unmap_end;
+      mm->vmas[slot].offset = old_offset + (unmap_end - old_addr);
+      mm->vmas[slot].len = vend - unmap_end;
+      if(mm->vmas[slot].filelen > unmap_end - old_addr)
+        mm->vmas[slot].filelen -= unmap_end - old_addr;
       else
-        p->vmas[slot].filelen = 0;
-      if(p->vmas[slot].f)
-        filedup(p->vmas[slot].f);
+        mm->vmas[slot].filelen = 0;
+      if(mm->vmas[slot].f)
+        filedup(mm->vmas[slot].f);
     }
 
-    if(vmawriteback(p, v, addr, n) < 0)
+    if(vmawriteback(p, v, unmap_start, n) < 0)
       return -1;
 
-    uvmunmap(p->pagetable, addr, n / PGSIZE, 1);
+    uvmunmap(p->pagetable, unmap_start, n / PGSIZE, 1);
 
-    if(addr == v->addr && addr + n == vend){
+    if(unmap_start == v->addr && unmap_end == vend){
       if(v->f)
         fileclose(v->f);
       memset(v, 0, sizeof(*v));
-    } else if(addr == v->addr){
+    } else if(unmap_start == v->addr){
       v->addr += n;
       v->offset += n;
       v->len -= n;
@@ -828,29 +918,31 @@ proc_munmap(struct proc *p, uint64 addr, uint64 len)
       else
         v->filelen = 0;
     } else {
-      v->len -= n;
+      v->len = unmap_start - v->addr;
       if(v->filelen > v->len)
         v->filelen = v->len;
     }
 
-    addr += n;
-    len -= n;
+    addr = unmap_end;
   }
+  linux_mm_apply_to_proc(p);
   return 0;
 }
 
 void
 proc_munmapall(struct proc *p)
 {
+  struct linux_mm *mm = p->mm;
   for(int i = 0; i < NVMA; i++){
-    if(p->vmas[i].used == 0)
+    if(mm->vmas[i].used == 0)
       continue;
-    proc_munmap(p, p->vmas[i].addr, PGROUNDUP(p->vmas[i].len));
+    proc_munmap(p, mm->vmas[i].addr, PGROUNDUP(mm->vmas[i].len));
   }
 }
 
 // Create a user page table for a given process, with no user memory,
-// but with trampoline and trapframe pages.
+// but with the shared trampoline/sigreturn pages and this thread's
+// trapframe slot.
 pagetable_t
 proc_pagetable(struct proc *p)
 {
@@ -871,27 +963,17 @@ proc_pagetable(struct proc *p)
     return 0;
   }
 
-  // map the trapframe page just below the trampoline page, for
-  // trampoline.S.
-  if(mappages(pagetable, TRAPFRAME, PGSIZE,
-              (uint64)(p->trapframe), PTE_R | PTE_W) < 0){
-    uvmunmap(pagetable, TRAMPOLINE, 1, 0);
-    uvmfree(pagetable, 0);
-    return 0;
-  }
-
-  if(mappages(pagetable, USYSCALL, PGSIZE,
-              (uint64)(p->usyscall), PTE_R | PTE_U) < 0){
-    uvmunmap(pagetable, TRAPFRAME, 1, 0);
-    uvmunmap(pagetable, TRAMPOLINE, 1, 0);
-    uvmfree(pagetable, 0);
-    return 0;
-  }
-
   if(mappages(pagetable, USIGRETURN, PGSIZE,
               (uint64)(p->sigreturn), PTE_R | PTE_X | PTE_U) < 0){
-    uvmunmap(pagetable, USYSCALL, 1, 0);
-    uvmunmap(pagetable, TRAPFRAME, 1, 0);
+    uvmunmap(pagetable, TRAMPOLINE, 1, 0);
+    uvmfree(pagetable, 0);
+    return 0;
+  }
+
+  // Map this thread's trapframe slot for trampoline.S.
+  if(mappages(pagetable, p->trapframe_va, PGSIZE,
+              (uint64)(p->trapframe), PTE_R | PTE_W) < 0){
+    uvmunmap(pagetable, USIGRETURN, 1, 0);
     uvmunmap(pagetable, TRAMPOLINE, 1, 0);
     uvmfree(pagetable, 0);
     return 0;
@@ -903,12 +985,12 @@ proc_pagetable(struct proc *p)
 // Free a process's page table, and free the
 // physical memory it refers to.
 void
-proc_freepagetable(pagetable_t pagetable, uint64 sz)
+proc_freepagetable(pagetable_t pagetable, uint64 sz, uint64 trapframe_va)
 {
   uvmunmap(pagetable, TRAMPOLINE, 1, 0);
-  uvmunmap(pagetable, TRAPFRAME, 1, 0);
-  uvmunmap(pagetable, USYSCALL, 1, 0);
   uvmunmap(pagetable, USIGRETURN, 1, 0);
+  if(trapframe_va)
+    uvmunmap(pagetable, trapframe_va, 1, 0);
   uvmunmap_all(pagetable);
   uvmfree(pagetable, sz);
 }
@@ -934,38 +1016,25 @@ userinit(void)
 int
 growproc(int n)
 {
-  uint64 oldsz, sz;
+  uint64 sz;
   struct proc *p = myproc();
+  struct linux_mm *mm = p->mm;
 
-  oldsz = sz = p->sz;
+  acquire(&mm->lock);
+  sz = mm->sz;
   if(n > 0){
     if((sz = uvmalloc(p->pagetable, sz, sz + n, PTE_W)) == 0) {
+      release(&mm->lock);
       return -1;
     }
   } else if(n < 0){
     sz = uvmdealloc(p->pagetable, sz, sz + n);
   }
-  p->sz = sz;
-  if(p->linux_share_vm){
-    for(struct proc *q = proc; q < &proc[NPROC]; q++){
-      if(q == p || q->state == UNUSED || !linux_same_thread_group(p, q))
-        continue;
-      if(n > 0){
-        for(uint64 a = PGROUNDUP(oldsz); a < sz; a += PGSIZE){
-          pte_t *pte = walk(p->pagetable, a, 0);
-          if(pte == 0 || (*pte & PTE_V) == 0)
-            continue;
-          if(walkaddr(q->pagetable, a) == 0 &&
-             mappages(q->pagetable, a, PGSIZE, PTE2PA(*pte), PTE_FLAGS(*pte)) == 0)
-            kref_inc(PTE2PA(*pte));
-        }
-      } else if(n < 0 && PGROUNDUP(sz) < PGROUNDUP(oldsz)){
-        uvmunmap(q->pagetable, PGROUNDUP(sz),
-                 (PGROUNDUP(oldsz) - PGROUNDUP(sz)) / PGSIZE, 1);
-      }
-    }
+  mm->sz = sz;
+  release(&mm->lock);
+  linux_mm_apply_to_proc(p);
+  if(p->linux_share_vm)
     linux_sync_vm_size(p);
-  }
   return 0;
 }
 
@@ -986,13 +1055,23 @@ forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, uint64 set_parent_tid,
   }
   pid = np->pid;
   
-  // Copy normal processes with COW. Linux CLONE_VM threads instead get
-  // distinct page tables whose user PTEs point at the same physical pages.
-  if((share_vm ? uvmshare(p->pagetable, np->pagetable, p->sz)
-               : uvmcopy(p->pagetable, np->pagetable, p->sz)) < 0){
-    freeproc(np);
-    release(&np->lock);
-    return -1;
+  if(share_vm){
+    proc_freepagetable(np->pagetable, 0, np->trapframe_va);
+    np->pagetable = p->pagetable;
+    uvmunmap(np->pagetable, np->trapframe_va, 1, 0);
+    if(mappages(np->pagetable, np->trapframe_va, PGSIZE,
+                (uint64)(np->trapframe), PTE_R | PTE_W) < 0){
+      np->pagetable = 0;
+      freeproc(np);
+      release(&np->lock);
+      return -1;
+    }
+  } else {
+    if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
+      freeproc(np);
+      release(&np->lock);
+      return -1;
+    }
   }
   np->sz = p->sz;
 
@@ -1047,13 +1126,22 @@ forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, uint64 set_parent_tid,
   np->linux_brk = p->linux_brk;
   np->linux_brk_limit = p->linux_brk_limit;
   safestrcpy(np->linux_exe_path, p->linux_exe_path, sizeof(np->linux_exe_path));
+  np->robust_list = 0;
+  np->robust_list_len = 0;
+  if(share_vm){
+    if(np->mm && linux_mm_put(np->mm))
+      linux_mm_free(np->mm);
+    np->mm = p->mm;
+    linux_mm_get(np->mm);
+  }
   for(i = 0; i < NVMA; i++){
     np->vmas[i] = p->vmas[i];
     if(np->vmas[i].used && np->vmas[i].f)
       filedup(np->vmas[i].f);
   }
-  if((share_vm ? share_mapped_vma_pages(p, np)
-               : copy_mapped_vma_pages(p, np)) < 0){
+  if(!share_vm)
+    linux_mm_snapshot_from_proc(np);
+  if(!share_vm && copy_mapped_vma_pages(p, np) < 0){
     linux_drop_vma_refs(np);
     proc_close_files(np);
     proc_put_cwd(np);
@@ -1143,15 +1231,11 @@ kexit(int status)
   if(p == initproc)
     panic("init exiting");
 
+  linux_handle_robust_list(p);
   linux_clear_child_tid(p);
 
   if(!thread_only)
     proc_munmapall(p);
-  else {
-    linux_preserve_thread_vma_pages(p);
-    linux_unmap_thread_vmas(p);
-    linux_drop_vma_refs(p);
-  }
 
   // Close all open files.
   proc_close_files(p);
@@ -1478,7 +1562,8 @@ forkret(void)
   prepare_return();
   uint64 satp = MAKE_SATP(p->pagetable);
   uint64 trampoline_userret = TRAMPOLINE + (userret - trampoline);
-  ((void (*)(uint64))trampoline_userret)(satp);
+  w_sscratch(p->trapframe_va);
+  ((void (*)(uint64, uint64))trampoline_userret)(satp, p->trapframe_va);
 }
 
 // Sleep on channel chan, releasing condition lock lk.

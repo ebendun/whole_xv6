@@ -248,6 +248,12 @@ r_satp()
   return x;
 }
 
+static inline void
+w_sscratch(uint64 x)
+{
+  asm volatile("csrw sscratch, %0" : : "r" (x));
+}
+
 // Supervisor Trap Cause
 static inline uint64
 r_scause()

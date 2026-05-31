@@ -23,6 +23,7 @@ struct test_entry tests[] = {
   { "/ext4/musl", "./libctest_testcode.sh" },
   { "/ext4/glibc", "./basic_testcode.sh" },
   { "/ext4/glibc", "./busybox_testcode.sh" },
+  //{ "/ext4/glibc", "./libctest_testcode.sh" },
   { 0, 0 },
 };
 

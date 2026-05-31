@@ -383,6 +383,5 @@ sbrklazy(int n) {
 int
 ugetpid(void)
 {
-  struct usyscall *u = (struct usyscall *)USYSCALL;
-  return u->pid;
+  return getpid();
 }
