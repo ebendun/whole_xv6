@@ -11,6 +11,7 @@
 #include "fs.h"
 #include "buf.h"
 #include "flag.h"
+#include "linux_errno.h"
 
 static struct spinlock futex_lock;
 static int futex_lock_inited;
@@ -223,7 +224,7 @@ linux_futex_wake_op(uint64 uaddr, uint64 uaddr2, int nrwake, int nrwake2,
   int cmparg = encoded & 0xfff;
 
   if(copyin(myproc()->pagetable, (char *)&old, uaddr2, sizeof(old)) < 0)
-    return -14; // EFAULT
+    return -LINUX_EFAULT;
 
   // Apply the encoded arithmetic/bit operation to uaddr2.
   switch(op & 7){
@@ -232,11 +233,11 @@ linux_futex_wake_op(uint64 uaddr, uint64 uaddr2, int nrwake, int nrwake2,
   case 2: new = old | oparg; break;  // FUTEX_OP_OR
   case 3: new = old & ~oparg; break; // FUTEX_OP_ANDN
   case 4: new = old ^ oparg; break;  // FUTEX_OP_XOR
-  default: return -38; // ENOSYS
+  default: return -LINUX_ENOSYS;
   }
 
   if(copyout(myproc()->pagetable, uaddr2, (char *)&new, sizeof(new)) < 0)
-    return -14; // EFAULT
+    return -LINUX_EFAULT;
 
   // Wake uaddr waiters unconditionally; wake uaddr2 waiters only if cmp passes.
   int count = linux_futex_wake_n_locked(uaddr, nrwake, 0xffffffffU);
@@ -451,15 +452,15 @@ sys_linux_get_robust_list(void)
       }
     }
     if(target == 0)
-      return -3; // ESRCH
+      return -LINUX_ESRCH;
   }
 
   if(copyout(myproc()->pagetable, headp, (char *)&target->robust_list,
              sizeof(target->robust_list)) < 0)
-    return -14; // EFAULT
+    return -LINUX_EFAULT;
   if(copyout(myproc()->pagetable, lenp, (char *)&target->robust_list_len,
              sizeof(target->robust_list_len)) < 0)
-    return -14; // EFAULT
+    return -LINUX_EFAULT;
   return 0;
 }
 
@@ -472,7 +473,7 @@ sys_linux_uname(void)
   char *fields[] = {
     "Linux",
     "xv6",
-    "5.4.0",
+    "0.0.1",
     "xv6-linux-compat",
     "riscv64",
     "xv6",
@@ -527,11 +528,11 @@ sys_linux_gettimeofday(void)
   linux_wall_timespec(&tv[0], &nsec);
   tv[1] = nsec / 1000;
   if(addr && copyout(myproc()->pagetable, addr, (char *)tv, sizeof(tv)) < 0)
-    return -14; // EFAULT
+    return -LINUX_EFAULT;
   if(tzaddr){
     memset(tz, 0, sizeof(tz));
     if(copyout(myproc()->pagetable, tzaddr, (char *)tz, sizeof(tz)) < 0)
-      return -14; // EFAULT
+      return -LINUX_EFAULT;
   }
   return 0;
 }
@@ -639,7 +640,7 @@ sys_linux_rt_sigaction(void)
   argaddr(1, &act);
   if((sig == 32 || sig == 33) && act != 0){
     if(copyin(myproc()->pagetable, (char *)&handler, act, sizeof(handler)) < 0)
-      return -14; // EFAULT
+      return -LINUX_EFAULT;
     linux_set_rt_signal_handler(handler);
   }
   return 0;
@@ -662,14 +663,14 @@ sys_linux_rt_sigprocmask(void)
   argaddr(3, &sigsetsize);
 
   if(sigsetsize != 8)
-    return -22; // EINVAL
+    return -LINUX_EINVAL;
   if(oldset != 0 &&
      copyout(p->pagetable, oldset, (char *)&p->linux_sigmask, 8) < 0)
-    return -14; // EFAULT
+    return -LINUX_EFAULT;
   if(set == 0)
     return 0;
   if(copyin(p->pagetable, (char *)&mask, set, 8) < 0)
-    return -14; // EFAULT
+    return -LINUX_EFAULT;
 
   // Linux never lets SIGKILL or SIGSTOP be blocked.
   mask &= ~((1ULL << (9 - 1)) | (1ULL << (19 - 1)));
@@ -680,7 +681,7 @@ sys_linux_rt_sigprocmask(void)
   else if(how == 2)  // SIG_SETMASK
     newmask = mask;
   else
-    return -22; // EINVAL
+    return -LINUX_EINVAL;
 
   p->linux_sigmask = newmask;
   return 0;
@@ -707,7 +708,7 @@ sys_linux_prlimit64(void)
 
   if(new_limit != 0 && resource == 7){
     if(copyin(myproc()->pagetable, (char *)lim, new_limit, sizeof(lim)) < 0)
-      return -14; // EFAULT
+      return -LINUX_EFAULT;
     linux_nofile_cur = lim[0];
     linux_nofile_max = lim[1];
   }
@@ -721,7 +722,7 @@ sys_linux_prlimit64(void)
       lim[1] = 1ULL << 32;
     }
     if(copyout(myproc()->pagetable, old_limit, (char *)lim, sizeof(lim)) < 0)
-      return -14; // EFAULT
+      return -LINUX_EFAULT;
   }
   return 0;
 }
@@ -755,7 +756,7 @@ sys_linux_futex(void)
   op &= ~(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
   bitset = (op == 9 || op == 10) ? (uint)val3 : 0xffffffffU;
   if((op == 9 || op == 10) && bitset == 0)
-    return -22; // EINVAL
+    return -LINUX_EINVAL;
 
   futex_init();
 
@@ -768,7 +769,7 @@ sys_linux_futex(void)
       uint deadline, timeout;
       if(copyin(myproc()->pagetable, (char *)ts, myproc()->trapframe->a3,
                 sizeof(ts)) < 0)
-        return -14; // EFAULT
+        return -LINUX_EFAULT;
       if(realtime){
         uint64 now_sec, now_nsec;
         uint64 target_nsec;
@@ -776,7 +777,7 @@ sys_linux_futex(void)
 
         linux_wall_timespec(&now_sec, &now_nsec);
         if(ts[0] < now_sec || (ts[0] == now_sec && ts[1] <= now_nsec))
-          return -110; // ETIMEDOUT
+          return -LINUX_ETIMEDOUT;
         target_nsec = ts[0] * 1000000000ULL + ts[1];
         now_total_nsec = now_sec * 1000000000ULL + now_nsec;
         timeout = (target_nsec - now_total_nsec + 99999999) / 100000000;
@@ -793,46 +794,46 @@ sys_linux_futex(void)
       if(copyin(myproc()->pagetable, (char *)&cur, uaddr, sizeof(cur)) < 0){
         if(vmfault(myproc()->pagetable, uaddr, 1) == 0 ||
            copyin(myproc()->pagetable, (char *)&cur, uaddr, sizeof(cur)) < 0)
-          return -14; // EFAULT
+          return -LINUX_EFAULT;
       }
       acquire(&futex_lock);
       if(copyin(myproc()->pagetable, (char *)&cur, uaddr, sizeof(cur)) < 0){
         release(&futex_lock);
-        return -14; // EFAULT
+        return -LINUX_EFAULT;
       }
       if(cur != val){
         release(&futex_lock);
-        return -11; // EAGAIN
+        return -LINUX_EAGAIN;
       }
       futex_set_bitset(bitset);
       int timedout = futex_timed_sleep(linux_futex_chan(uaddr), &futex_lock, deadline);
       release(&futex_lock);
       if(linux_take_interrupt())
-        return -4; // EINTR
+        return -LINUX_EINTR;
       if(timedout)
-        return -110; // ETIMEDOUT
+        return -LINUX_ETIMEDOUT;
       return 0;
     }
     if(copyin(myproc()->pagetable, (char *)&cur, uaddr, sizeof(cur)) < 0){
       if(vmfault(myproc()->pagetable, uaddr, 1) == 0 ||
          copyin(myproc()->pagetable, (char *)&cur, uaddr, sizeof(cur)) < 0)
-        return -14; // EFAULT
+        return -LINUX_EFAULT;
     }
     acquire(&futex_lock);
     if(copyin(myproc()->pagetable, (char *)&cur, uaddr, sizeof(cur)) < 0){
       release(&futex_lock);
-      return -14; // EFAULT
+      return -LINUX_EFAULT;
     }
     if(cur != val)
     {
       release(&futex_lock);
-      return -11; // EAGAIN
+      return -LINUX_EAGAIN;
     }
     futex_set_bitset(bitset);
     sleep(linux_futex_chan(uaddr), &futex_lock);
     release(&futex_lock);
     if(linux_take_interrupt())
-      return -4; // EINTR
+      return -LINUX_EINTR;
     return 0;
   case 1:  // FUTEX_WAKE
   case 10: // FUTEX_WAKE_BITSET
@@ -855,9 +856,9 @@ sys_linux_futex(void)
   case 4:  // FUTEX_CMP_REQUEUE
     // Requeue only if the futex word still matches val3.
     if(copyin(myproc()->pagetable, (char *)&cur, uaddr, sizeof(cur)) < 0)
-      return -14; // EFAULT
+      return -LINUX_EFAULT;
     if(cur != val3)
-      return -11; // EAGAIN
+      return -LINUX_EAGAIN;
     futex_init();
     acquire(&futex_lock);
     int nrrequeue = (int)myproc()->trapframe->a3;
@@ -942,7 +943,7 @@ sys_linux_nanosleep(void)
   while(ticks - start < target){
     if(killed(myproc()) || linux_take_interrupt()){
       release(&tickslock.l);
-      return -4; // EINTR
+      return -LINUX_EINTR;
     }
     sleep(&ticks, &tickslock.l);
   }
@@ -962,11 +963,11 @@ sys_linux_clock_nanosleep(void)
   argint(1, &flags);
   argaddr(2, &req);
   if(req == 0 || copyin(myproc()->pagetable, (char *)ts, req, sizeof(ts)) < 0)
-    return -14; // EFAULT
+    return -LINUX_EFAULT;
   if(clockid != 0 && clockid != 1)
-    return -22; // EINVAL
+    return -LINUX_EINVAL;
   if(ts[1] >= 1000000000ULL)
-    return -22; // EINVAL
+    return -LINUX_EINVAL;
 
   if(flags & 1){ // TIMER_ABSTIME
     uint64 now_sec, now_nsec, target_ns, now_ns;
@@ -988,7 +989,7 @@ sys_linux_clock_nanosleep(void)
   while(ticks - start < target){
     if(killed(myproc()) || linux_take_interrupt()){
       release(&tickslock.l);
-      return -4; // EINTR
+      return -LINUX_EINTR;
     }
     sleep(&ticks, &tickslock.l);
   }
@@ -1035,7 +1036,7 @@ sys_pgpte(void)
 {
   // Debug syscall: return the PTE for a user virtual address.
   uint64 va;
-  struct proc *p;  
+  struct proc *p;
 
   p = myproc();
   argaddr(0, &va);
@@ -1049,7 +1050,7 @@ int
 sys_kpgtbl(void)
 {
   // Debug syscall: print this process's page table.
-  struct proc *p;  
+  struct proc *p;
 
   p = myproc();
   vmprint(p->pagetable);

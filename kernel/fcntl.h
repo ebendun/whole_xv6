@@ -4,6 +4,8 @@
 #define O_CREATE  0x200
 #define O_TRUNC   0x400
 #define O_APPEND  0x800
+#define O_NONBLOCK 04000
+#define O_CLOEXEC 02000000
 
 #define PROT_NONE       0x0
 #define PROT_READ       0x1

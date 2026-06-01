@@ -17,6 +17,7 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "linux_errno.h"
 #include "vfs.h"
 
 static int linux_copy_stat_time(uint64 staddr, uint64 dev, uint64 ino,
@@ -238,7 +239,7 @@ sys_dup(void)
   if(argfd(0, 0, &f) < 0)
     return -1;
   if((fd=fdalloc(f)) < 0)
-    return myproc()->is_linux ? -24 : -1;
+    return myproc()->is_linux ? -LINUX_EMFILE : -1;
   filedup(f);
   return fd;
 }
@@ -256,20 +257,20 @@ sys_linux_dup3(void)
   argint(2, &flags);
 
   if(oldfd < 0 || oldfd >= NOFILE || newfd < 0 || newfd >= NOFILE)
-    return -9; // EBADF
-  if(flags & ~02000000)
-    return -22; // EINVAL
+    return -LINUX_EBADF;
+  if(flags & ~O_CLOEXEC)
+    return -LINUX_EINVAL;
   if(oldfd == newfd)
-    return -22; // EINVAL
+    return -LINUX_EINVAL;
   if((f = p->ofile[oldfd]) == 0)
-    return -9; // EBADF
+    return -LINUX_EBADF;
   if(p->ofile[newfd]){
     fileclose(p->ofile[newfd]);
     p->ofile[newfd] = 0;
     p->ofd_flags[newfd] = 0;
   }
   p->ofile[newfd] = filedup(f);
-  p->ofd_flags[newfd] = (flags & 02000000) ? 1 : 0; // O_CLOEXEC
+  p->ofd_flags[newfd] = (flags & O_CLOEXEC) ? 1 : 0;
   linux_sync_file_table(p);
   return newfd;
 }
@@ -335,20 +336,20 @@ sys_linux_socket(void)
   argint(1, &type);
   argint(2, &proto);
   if(domain != 2) // AF_INET
-    return -97; // EAFNOSUPPORT
+    return -LINUX_EAFNOSUPPORT;
   if((type & 0xf) != 1 && (type & 0xf) != 2)
-    return -94; // ESOCKTNOSUPPORT
+    return -LINUX_ESOCKTNOSUPPORT;
 
   if((f = filealloc()) == 0)
-    return -24; // EMFILE
+    return -LINUX_EMFILE;
   f->type = FD_SOCKET;
   f->readable = 1;
   f->writable = 1;
   f->sock_domain = domain;
   f->sock_type = type;
   f->sock_proto = proto;
-  if(type & 04000)
-    f->status_flags |= 04000; // O_NONBLOCK
+  if(type & O_NONBLOCK)
+    f->status_flags |= O_NONBLOCK;
   f->sock_listening = 0;
   f->sock_connected = 0;
   f->sock_pending = 0;
@@ -359,9 +360,9 @@ sys_linux_socket(void)
 
   if((fd = fdalloc(f)) < 0){
     fileclose(f);
-    return -24; // EMFILE
+    return -LINUX_EMFILE;
   }
-  if(type & 02000000){
+  if(type & O_CLOEXEC){
     myproc()->ofd_flags[fd] = 1; // FD_CLOEXEC
     linux_sync_file_table(myproc());
   }
@@ -379,11 +380,11 @@ sys_linux_bind(void)
   argaddr(1, &addr);
   argaddr(2, &len);
   if(argfd(0, 0, &f) < 0 || f->type != FD_SOCKET)
-    return -9; // EBADF
+    return -LINUX_EBADF;
   if(linux_sock_copyin(addr, len, &sa) < 0)
-    return -14; // EFAULT
+    return -LINUX_EFAULT;
   if(sa.family != 2)
-    return -97; // EAFNOSUPPORT
+    return -LINUX_EAFNOSUPPORT;
 
   linux_socket_lock_init();
   acquire(&linux_socket_lock);
@@ -391,7 +392,7 @@ sys_linux_bind(void)
     sa.port = linux_sock_htons(linux_sock_alloc_port());
   if(linux_sock_find_bound(linux_sock_port(&sa), (f->sock_type & 0xf) == 1)){
     release(&linux_socket_lock);
-    return -98; // EADDRINUSE
+    return -LINUX_EADDRINUSE;
   }
   f->sock_local = sa;
   release(&linux_socket_lock);
@@ -408,13 +409,13 @@ sys_linux_getsockname(void)
   argaddr(1, &addr);
   argaddr(2, &lenaddr);
   if(argfd(0, 0, &f) < 0 || f->type != FD_SOCKET)
-    return -9; // EBADF
+    return -LINUX_EBADF;
   if(f->sock_local.family == 0)
     f->sock_local.family = 2;
   if(f->sock_local.port == 0)
     f->sock_local.port = linux_sock_htons(linux_sock_alloc_port());
   if(linux_sock_copyout(addr, lenaddr, &f->sock_local) < 0)
-    return -14; // EFAULT
+    return -LINUX_EFAULT;
   return 0;
 }
 
@@ -432,9 +433,9 @@ sys_linux_listen(void)
   struct file *f;
 
   if(argfd(0, 0, &f) < 0 || f->type != FD_SOCKET)
-    return -9; // EBADF
+    return -LINUX_EBADF;
   if((f->sock_type & 0xf) != 1)
-    return -95; // EOPNOTSUPP
+    return -LINUX_EOPNOTSUPP;
   if(f->sock_local.port == 0)
     f->sock_local.port = linux_sock_htons(linux_sock_alloc_port());
   f->sock_listening = 1;
@@ -452,9 +453,9 @@ sys_linux_connect(void)
   argaddr(1, &addr);
   argaddr(2, &len);
   if(argfd(0, 0, &f) < 0 || f->type != FD_SOCKET)
-    return -9; // EBADF
+    return -LINUX_EBADF;
   if(linux_sock_copyin(addr, len, &sa) < 0)
-    return -14; // EFAULT
+    return -LINUX_EFAULT;
   f->sock_peer = sa;
   if(f->sock_local.family == 0)
     f->sock_local.family = 2;
@@ -487,9 +488,9 @@ sys_linux_accept(void)
   argaddr(1, &addr);
   argaddr(2, &lenaddr);
   if(argfd(0, 0, &f) < 0 || f->type != FD_SOCKET)
-    return -9; // EBADF
+    return -LINUX_EBADF;
   if((f->sock_type & 0xf) != 1 || f->sock_listening == 0)
-    return -22; // EINVAL
+    return -LINUX_EINVAL;
 
   linux_socket_lock_init();
   acquire(&linux_socket_lock);
@@ -499,7 +500,7 @@ sys_linux_accept(void)
   release(&linux_socket_lock);
 
   if((nf = filealloc()) == 0)
-    return -24; // EMFILE
+    return -LINUX_EMFILE;
   nf->type = FD_SOCKET;
   nf->readable = 1;
   nf->writable = 1;
@@ -511,10 +512,10 @@ sys_linux_accept(void)
   nf->sock_connected = 1;
   if((fd = fdalloc(nf)) < 0){
     fileclose(nf);
-    return -24; // EMFILE
+    return -LINUX_EMFILE;
   }
   if(addr != 0 && linux_sock_copyout(addr, lenaddr, &nf->sock_peer) < 0)
-    return -14; // EFAULT
+    return -LINUX_EFAULT;
   return fd;
 }
 
@@ -534,12 +535,12 @@ sys_linux_sendto(void)
   argaddr(5, &addrlen);
   (void)flags;
   if(argfd(0, 0, &f) < 0 || f->type != FD_SOCKET)
-    return -9; // EBADF
+    return -LINUX_EBADF;
   if(len > SOCKET_PAYLOAD)
     len = SOCKET_PAYLOAD;
   if(addr != 0){
     if(linux_sock_copyin(addr, addrlen, &sa) < 0)
-      return -14;
+      return -LINUX_EFAULT;
     f->sock_peer = sa;
   } else {
     sa = f->sock_peer;
@@ -555,14 +556,14 @@ sys_linux_sendto(void)
   dst = linux_sock_find_bound(linux_sock_port(&sa), 0);
   if(dst == 0 || dst->sock_qcount >= SOCKET_QUEUE){
     release(&linux_socket_lock);
-    return -111; // ECONNREFUSED
+    return -LINUX_ECONNREFUSED;
   }
   struct linux_sockpkt *pkt = &dst->sock_q[dst->sock_qtail];
   pkt->len = len;
   pkt->from = f->sock_local;
   if(copyin(myproc()->pagetable, pkt->data, buf, len) < 0){
     release(&linux_socket_lock);
-    return -14;
+    return -LINUX_EFAULT;
   }
   dst->sock_qtail = (dst->sock_qtail + 1) % SOCKET_QUEUE;
   dst->sock_qcount++;
@@ -586,7 +587,7 @@ sys_linux_recvfrom(void)
   argaddr(5, &addrlen);
   (void)flags;
   if(argfd(0, 0, &f) < 0 || f->type != FD_SOCKET)
-    return -9; // EBADF
+    return -LINUX_EBADF;
 
   linux_socket_lock_init();
   acquire(&linux_socket_lock);
@@ -600,9 +601,9 @@ sys_linux_recvfrom(void)
   if(len > pkt.len)
     len = pkt.len;
   if(copyout(myproc()->pagetable, buf, pkt.data, len) < 0)
-    return -14;
+    return -LINUX_EFAULT;
   if(addr != 0 && linux_sock_copyout(addr, addrlen, &pkt.from) < 0)
-    return -14;
+    return -LINUX_EFAULT;
   return len;
 }
 
@@ -628,7 +629,7 @@ sys_write(void)
   struct file *f;
   int n;
   uint64 p;
-  
+
   argaddr(1, &p);
   argint(2, &n);
   if(argfd(0, 0, &f) < 0)
@@ -663,7 +664,7 @@ sys_linux_close(void)
   struct proc *p = myproc();
   argint(0, &fd);
   if(argfd(0, &fd, &f) < 0){
-    return -9; // EBADF
+    return -LINUX_EBADF;
   }
   p->ofile[fd] = 0;
   p->ofd_flags[fd] = 0;
@@ -753,46 +754,46 @@ linux_mmap_create(uint64 addr, uint64 len, int prot, int flags, int fd,
   int slot;
 
   if(len == 0)
-    return linux_abi ? -22 : -1; // EINVAL
+    return linux_abi ? -LINUX_EINVAL : -1; // EINVAL
   if(prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC))
-    return linux_abi ? -22 : -1; // EINVAL
+    return linux_abi ? -LINUX_EINVAL : -1; // EINVAL
   if(map_type != MAP_SHARED && map_type != MAP_PRIVATE)
-    return linux_abi ? -22 : -1; // EINVAL
+    return linux_abi ? -LINUX_EINVAL : -1; // EINVAL
   if((offset % PGSIZE) != 0)
-    return linux_abi ? -22 : -1; // EINVAL
+    return linux_abi ? -LINUX_EINVAL : -1; // EINVAL
 
   maplen = PGROUNDUP(len);
   if(maplen == 0 || maplen < len)
-    return linux_abi ? -12 : -1; // ENOMEM
+    return linux_abi ? -LINUX_ENOMEM : -1; // ENOMEM
 
   if(anonymous == 0){
     if(fd < 0 || fd >= NOFILE || (f = p->ofile[fd]) == 0)
-      return linux_abi ? -9 : -1; // EBADF
+      return linux_abi ? -LINUX_EBADF : -1; // EBADF
     if(vfs_file_stat_node(f, &node) < 0 || node.type != T_FILE)
-      return linux_abi ? -13 : -1; // EACCES
+      return linux_abi ? -LINUX_EACCES : -1; // EACCES
     if((prot & PROT_READ) && f->readable == 0)
-      return linux_abi ? -13 : -1; // EACCES
+      return linux_abi ? -LINUX_EACCES : -1; // EACCES
     if((flags & MAP_SHARED) && (prot & PROT_WRITE) && f->writable == 0)
-      return linux_abi ? -13 : -1; // EACCES
+      return linux_abi ? -LINUX_EACCES : -1; // EACCES
   } else {
     memset(&node, 0, sizeof(node));
   }
 
   if(flags & MAP_FIXED){
     if((addr % PGSIZE) != 0 || linux_mmap_addr_ok(p, addr, maplen) == 0)
-      return linux_abi ? -22 : -1; // EINVAL
+      return linux_abi ? -LINUX_EINVAL : -1; // EINVAL
     if(linux_vma_overlaps(p, addr, maplen) && proc_munmap(p, addr, maplen) < 0)
-      return linux_abi ? -12 : -1; // ENOMEM
+      return linux_abi ? -LINUX_ENOMEM : -1; // ENOMEM
     mapaddr = addr;
   } else {
     mapaddr = linux_mmap_pick_addr(p, addr, maplen);
     if(mapaddr == 0)
-      return linux_abi ? -12 : -1; // ENOMEM
+      return linux_abi ? -LINUX_ENOMEM : -1; // ENOMEM
   }
 
   slot = linux_vma_slot(p);
   if(slot < 0)
-    return linux_abi ? -12 : -1; // ENOMEM
+    return linux_abi ? -LINUX_ENOMEM : -1; // ENOMEM
 
   if(mapaddr < mm->mmap_base)
     mm->mmap_base = mapaddr;
@@ -858,9 +859,9 @@ sys_munmap(void)
   if(len == 0)
     return 0;
   if((addr % PGSIZE) != 0 || addr + len < addr)
-    return p->is_linux ? -22 : -1; // EINVAL
+    return p->is_linux ? -LINUX_EINVAL : -1; // EINVAL
   if(proc_munmap(p, addr, PGROUNDUP(len)) < 0)
-    return p->is_linux ? -22 : -1; // EINVAL
+    return p->is_linux ? -LINUX_EINVAL : -1; // EINVAL
   return 0;
 }
 
@@ -879,9 +880,9 @@ sys_linux_madvise(void)
   if(len == 0)
     return 0;
   if((addr % PGSIZE) != 0 || addr + len < addr)
-    return -22; // EINVAL
+    return -LINUX_EINVAL;
   if(advice < 0 || advice > 28)
-    return -22; // EINVAL
+    return -LINUX_EINVAL;
   return 0;
 }
 
@@ -916,7 +917,7 @@ linux_mprotect_one(struct proc *p, uint64 start, uint64 end, int prot)
         if(slots[j] < 0){
           for(int k = 0; k < j; k++)
             mm->vmas[slots[k]].used = 0;
-          return -12; // ENOMEM
+          return -LINUX_ENOMEM;
         }
       }
       for(int j = 0; j < need; j++)
@@ -967,7 +968,7 @@ linux_mprotect_one(struct proc *p, uint64 start, uint64 end, int prot)
       return 0;
     }
   }
-  return -12; // ENOMEM
+  return -LINUX_ENOMEM;
 }
 
 static int
@@ -977,7 +978,7 @@ linux_mprotect_mapped_pages(struct proc *p, uint64 start, uint64 end, int prot)
   int perm = PTE_U;
 
   if(prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC))
-    return -22; // EINVAL
+    return -LINUX_EINVAL;
   if(prot & PROT_READ)
     perm |= PTE_R;
   if(prot & PROT_WRITE)
@@ -988,7 +989,7 @@ linux_mprotect_mapped_pages(struct proc *p, uint64 start, uint64 end, int prot)
   for(uint64 a = start; a < end; a += PGSIZE){
     pte_t *pte = walk(p->pagetable, a, 0);
     if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
-      return -12; // ENOMEM
+      return -LINUX_ENOMEM;
   }
 
   for(uint64 a = start; a < end; a += PGSIZE){
@@ -1013,15 +1014,15 @@ sys_linux_mprotect(void)
   if(len == 0)
     return 0;
   if((addr % PGSIZE) != 0 || addr + len < addr)
-    return -22; // EINVAL
+    return -LINUX_EINVAL;
   if(prot & ~(PROT_READ | PROT_WRITE | PROT_EXEC))
-    return -22; // EINVAL
+    return -LINUX_EINVAL;
 
   uint64 start = addr;
   uint64 end = PGROUNDUP(addr + len);
   if(linux_mprotect_one(p, start, end, prot) < 0 &&
      linux_mprotect_mapped_pages(p, start, end, prot) < 0)
-    return -12; // ENOMEM
+    return -LINUX_ENOMEM;
 
   return 0;
 }
@@ -1084,7 +1085,7 @@ linux_stat_proc_path(struct proc *p, char *path, struct vfs_path *vp,
   struct vfs_path tmp;
 
   if(p == 0 || path == 0 || node == 0)
-    return -2; // ENOENT
+    return -LINUX_ENOENT;
 
   if(vp == 0){
     vp = &tmp;
@@ -1097,7 +1098,7 @@ linux_stat_proc_path(struct proc *p, char *path, struct vfs_path *vp,
     return 0;
   }
 
-  return -2; // ENOENT
+  return -LINUX_ENOENT;
 }
 
 static void
@@ -1222,7 +1223,7 @@ sys_open(void)
        vp.ops->file->open(vp.mount, vp.inner, omode, &f) == 0){
       if((fd = fdalloc(f)) < 0){
         fileclose(f);
-        return -24; // EMFILE
+        return -LINUX_EMFILE;
       }
       return fd;
     }
@@ -1238,7 +1239,7 @@ sys_open(void)
     return -1;
   if((fd = fdalloc(f)) < 0){
     fileclose(f);
-    return -24; // EMFILE
+    return -LINUX_EMFILE;
   }
   return fd;
 }
@@ -1305,9 +1306,9 @@ sys_linux_openat(void)
   argint(2, &flags);
   argaddr(3, &mode);
   if(argstr(1, path, MAXPATH) < 0)
-    return -14; // EFAULT
+    return -LINUX_EFAULT;
   if(linux_openat_resolve(p, dirfd, path, opath, sizeof(opath)) < 0)
-    return -9; // EBADF
+    return -LINUX_EBADF;
   int has_fd = 0;
   for(int i = 0; i < NOFILE && (uint64)i < linux_nofile_limit(); i++){
     if(p->ofile[i] == 0){
@@ -1316,7 +1317,7 @@ sys_linux_openat(void)
     }
   }
   if(has_fd == 0)
-    return -24; // EMFILE
+    return -LINUX_EMFILE;
   omode = linux_open_flags(flags);
   if((omode & O_CREATE) == 0){
     if(vfs_resolve_proc_path(p, opath, &vp) == 0 &&
@@ -1324,11 +1325,11 @@ sys_linux_openat(void)
        vp.ops->file->open(vp.mount, vp.inner, omode, &f) == 0){
       if((fd = fdalloc(f)) < 0){
         fileclose(f);
-        return -24; // EMFILE
+        return -LINUX_EMFILE;
       }
       return fd;
     }
-    return -2; // ENOENT
+    return -LINUX_ENOENT;
   }
 
   if(vfs_prepare_write_path(p, opath, actual, sizeof(actual), &vp) < 0 ||
@@ -1336,11 +1337,11 @@ sys_linux_openat(void)
      vp.ops->file == 0 || vp.ops->file->open == 0 ||
      vp.ops->inode->create(vp.mount, vp.inner, T_FILE, mode, &node) < 0 ||
      vp.ops->file->open(vp.mount, vp.inner, omode & ~O_CREATE, &f) < 0)
-    return -2; // ENOENT
+    return -LINUX_ENOENT;
 
   if((fd = fdalloc(f)) < 0){
     fileclose(f);
-    return -24; // EMFILE
+    return -LINUX_EMFILE;
   }
   return fd;
 }
@@ -1359,19 +1360,19 @@ sys_linux_writev(void)
   argaddr(1, &iov);
   argint(2, &iovcnt);
   if(argfd(0, 0, &f) < 0)
-    return -9; // EBADF
+    return -LINUX_EBADF;
   if(iovcnt < 0 || iovcnt > 16)
-    return -22; // EINVAL
+    return -LINUX_EINVAL;
 
   for(int i = 0; i < iovcnt; i++){
     if(fetchaddr(iov + i * 16, &base) < 0 ||
        fetchaddr(iov + i * 16 + 8, &len) < 0)
-      return -14; // EFAULT
+      return -LINUX_EFAULT;
     if(len > 0x7fffffff)
-      return -22; // EINVAL
+      return -LINUX_EINVAL;
     int n = filewrite(f, base, len);
     if(n < 0)
-      return total > 0 ? total : -9; // EBADF
+      return total > 0 ? total : -LINUX_EBADF; // EBADF
     total += n;
   }
   return total;
@@ -1391,19 +1392,19 @@ sys_linux_readv(void)
   argaddr(1, &iov);
   argint(2, &iovcnt);
   if(argfd(0, 0, &f) < 0)
-    return -9; // EBADF
+    return -LINUX_EBADF;
   if(iovcnt < 0 || iovcnt > 16)
-    return -22; // EINVAL
+    return -LINUX_EINVAL;
 
   for(int i = 0; i < iovcnt; i++){
     if(fetchaddr(iov + i * 16, &base) < 0 ||
        fetchaddr(iov + i * 16 + 8, &len) < 0)
-      return -14; // EFAULT
+      return -LINUX_EFAULT;
     if(len > 0x7fffffff)
-      return -22; // EINVAL
+      return -LINUX_EINVAL;
     int n = fileread(f, base, len);
     if(n < 0)
-      return total > 0 ? total : -9; // EBADF
+      return total > 0 ? total : -LINUX_EBADF; // EBADF
     total += n;
     if(n < len)
       break;
@@ -1423,11 +1424,11 @@ sys_linux_lseek(void)
   argaddr(1, &off);
   argint(2, &whence);
   if(argfd(0, 0, &f) < 0)
-    return -9; // EBADF
+    return -LINUX_EBADF;
 
   if(f->vfs_ops && f->vfs_ops->file && f->vfs_ops->file->lseek)
     return f->vfs_ops->file->lseek(f, off, whence);
-  return -29; // ESPIPE
+  return -LINUX_ESPIPE;
 }
 
 uint64
@@ -1445,9 +1446,9 @@ sys_linux_pread64(void)
   argint(2, &n);
   argaddr(3, &off);
   if(argfd(0, 0, &f) < 0)
-    return -9; // EBADF
+    return -LINUX_EBADF;
   if(n < 0)
-    return -22; // EINVAL
+    return -LINUX_EINVAL;
 
   oldoff = f->off;
   f->off = off;
@@ -1465,7 +1466,7 @@ sys_linux_statfs(void)
   uint64 st[15];
 
   if(argstr(0, path, MAXPATH) < 0)
-    return -14; // EFAULT
+    return -LINUX_EFAULT;
   argaddr(1, &buf);
   memset(st, 0, sizeof(st));
   st[0] = 0x10203040; // f_type
@@ -1478,7 +1479,7 @@ sys_linux_statfs(void)
   st[8] = DIRSIZ;     // f_namelen
   st[9] = BSIZE;      // f_frsize
   if(copyout(myproc()->pagetable, buf, (char *)st, sizeof(st)) < 0)
-    return -14; // EFAULT
+    return -LINUX_EFAULT;
   return 0;
 }
 
@@ -1502,23 +1503,23 @@ sys_linux_sendfile(void)
   argaddr(3, &count);
 
   if(outfd < 0 || outfd >= NOFILE || infd < 0 || infd >= NOFILE)
-    return -9; // EBADF
+    return -LINUX_EBADF;
   if((outf = p->ofile[outfd]) == 0 || (inf = p->ofile[infd]) == 0)
-    return -9; // EBADF
+    return -LINUX_EBADF;
   if(outf->type != FD_PIPE || outf->writable == 0)
-    return -22; // EINVAL
+    return -LINUX_EINVAL;
   if(vfs_file_stat_node(inf, &node) < 0 || node.type != T_FILE)
-    return -22; // EINVAL
+    return -LINUX_EINVAL;
   if(offaddr != 0){
     if(fetchaddr(offaddr, &off) < 0)
-      return -14; // EFAULT
+      return -LINUX_EFAULT;
   } else {
     off = inf->off;
   }
 
   buf = kalloc();
   if(buf == 0)
-    return -12; // ENOMEM
+    return -LINUX_ENOMEM;
 
   // Move data in page-sized chunks through a temporary kernel buffer.
   while(done < count){
@@ -1534,7 +1535,7 @@ sys_linux_sendfile(void)
     w = pipewrite_kernel(outf->pipe, buf, r);
     if(w < 0){
       if(done == 0)
-        err = -32; // EPIPE
+        err = -LINUX_EPIPE;
       break;
     }
     done += w;
@@ -1567,7 +1568,7 @@ sys_linux_ppoll(void)
   argaddr(0, &fds);
   argint(1, &nfds);
   if(nfds < 0 || nfds > 64)
-    return -22; // EINVAL
+    return -LINUX_EINVAL;
 
   for(int i = 0; i < nfds; i++){
     uint64 addr = fds + i * 8;
@@ -1577,7 +1578,7 @@ sys_linux_ppoll(void)
 
     if(copyin(p->pagetable, (char *)&fd, addr, sizeof(fd)) < 0 ||
        copyin(p->pagetable, (char *)&events, addr + 4, sizeof(events)) < 0)
-      return -14; // EFAULT
+      return -LINUX_EFAULT;
     if(fd >= 0 && fd < NOFILE && p->ofile[fd]){
       revents = events & 0x5; // POLLIN | POLLOUT
       if(revents == 0)
@@ -1585,7 +1586,7 @@ sys_linux_ppoll(void)
       ready++;
     }
     if(copyout(p->pagetable, addr + 6, (char *)&revents, sizeof(revents)) < 0)
-      return -14; // EFAULT
+      return -LINUX_EFAULT;
   }
   return ready;
 }
@@ -1608,16 +1609,16 @@ sys_linux_newfstatat(void)
   argint(3, &flags);
   (void)flags;
   if(argstr(1, path, MAXPATH) < 0)
-    return -14; // EFAULT
+    return -LINUX_EFAULT;
   if(path[0] == 0){
     struct file *f;
 
     if((flags & 0x1000) == 0)
-      return -2; // ENOENT
+      return -LINUX_ENOENT;
     if(dirfd < 0 || dirfd >= NOFILE || (f = p->ofile[dirfd]) == 0)
-      return -9; // EBADF
+      return -LINUX_EBADF;
     if(vfs_file_stat_node(f, &node) < 0)
-      return -9; // EBADF
+      return -LINUX_EBADF;
     mode = node.mode | 0777;
     if(mode == 0777){
       if(node.type == T_DIR)
@@ -1634,7 +1635,7 @@ sys_linux_newfstatat(void)
   (void)dirfd;
 
   if(linux_stat_proc_path(p, path, &vp, &node, actual, sizeof(actual)) < 0)
-    return -2; // ENOENT
+    return -LINUX_ENOENT;
 
   mode = node.mode | 0777;
   if(mode == 0777){
@@ -1674,16 +1675,16 @@ sys_linux_utimensat(void)
 
   if(pathaddr == 0){
     if(dirfd < 0 || dirfd >= NOFILE || (f = p->ofile[dirfd]) == 0)
-      return -9; // EBADF
+      return -LINUX_EBADF;
     if(f->ext4_path[0])
       safestrcpy(actual, f->ext4_path, sizeof(actual));
     else
       actual[0] = 0;
   } else {
     if(argstr(1, path, MAXPATH) < 0)
-      return -14; // EFAULT
+      return -LINUX_EFAULT;
     if(path[0] == 0)
-      return -2; // ENOENT
+      return -LINUX_ENOENT;
     if(linux_stat_proc_path(p, path, 0, &node, actual, sizeof(actual)) < 0){
       char prefix[MAXPATH];
       char *slash = 0;
@@ -1699,16 +1700,16 @@ sys_linux_utimensat(void)
         prefix[n] = 0;
         if(linux_stat_proc_path(p, prefix, 0, &node, actual, sizeof(actual)) == 0 &&
            node.type != T_DIR)
-          return -20; // ENOTDIR
+          return -LINUX_ENOTDIR;
       }
-      return -2; // ENOENT
+      return -LINUX_ENOENT;
     }
   }
 
   linux_now_timespec(&now_sec, &now_nsec);
   if(times != 0){
     if(copyin(myproc()->pagetable, (char *)ts, times, sizeof(ts)) < 0){
-      return -14; // EFAULT
+      return -LINUX_EFAULT;
     }
     have_ts = 1;
   }
@@ -1747,7 +1748,7 @@ sys_linux_utimensat(void)
   struct linux_utime_entry *e = linux_utime_find(actual, 1);
   if(e == 0){
     release(&linux_utime_lock);
-    return -12; // ENOMEM
+    return -LINUX_ENOMEM;
   }
 
   linux_apply_times(&e->atime_sec, &e->atime_nsec, &e->mtime_sec,
@@ -2119,7 +2120,7 @@ sys_chdir(void)
   struct vfs_path vp;
   struct vfs_node node;
   struct proc *p = myproc();
-  
+
   if(argstr(0, path, MAXPATH) < 0)
     return -1;
 
@@ -2320,14 +2321,14 @@ sys_linux_pipe2(void)
   argaddr(0, &fdarray);
   argint(1, &flags);
 
-  if(flags & ~(02000000 | 04000))
-    return -22; // EINVAL
+  if(flags & ~(O_CLOEXEC | O_NONBLOCK))
+    return -LINUX_EINVAL;
 
   if(pipealloc(&rf, &wf) < 0)
-    return -24; // EMFILE
-  if(flags & 04000){ // O_NONBLOCK
-    rf->status_flags |= 04000;
-    wf->status_flags |= 04000;
+    return -LINUX_EMFILE;
+  if(flags & O_NONBLOCK){
+    rf->status_flags |= O_NONBLOCK;
+    wf->status_flags |= O_NONBLOCK;
   }
 
   fd0 = -1;
@@ -2339,9 +2340,9 @@ sys_linux_pipe2(void)
     linux_sync_file_table(p);
     fileclose(rf);
     fileclose(wf);
-    return -24; // EMFILE
+    return -LINUX_EMFILE;
   }
-  if(flags & 02000000){ // O_CLOEXEC
+  if(flags & O_CLOEXEC){
     p->ofd_flags[fd0] = 1;
     p->ofd_flags[fd1] = 1;
     linux_sync_file_table(p);
@@ -2355,7 +2356,7 @@ sys_linux_pipe2(void)
     linux_sync_file_table(p);
     fileclose(rf);
     fileclose(wf);
-    return -14; // EFAULT
+    return -LINUX_EFAULT;
   }
   return 0;
 }

@@ -7,6 +7,7 @@
 #include "fs.h"
 #include "sleeplock.h"
 #include "file.h"
+#include "linux_errno.h"
 
 #define PIPESIZE 512
 
@@ -73,6 +74,8 @@ pipeclose(struct pipe *pi, int writable)
     release(&pi->lock);
 }
 
+
+//this is a provider-consumer model
 int
 pipewrite(struct pipe *pi, uint64 addr, int n, int nonblock)
 {
@@ -87,12 +90,12 @@ pipewrite(struct pipe *pi, uint64 addr, int n, int nonblock)
     }
     if(linux_take_interrupt()){
       release(&pi->lock);
-      return -4; // EINTR
+      return -LINUX_EINTR;
     }
     if(pi->nwrite == pi->nread + PIPESIZE){ //DOC: pipewrite-full
       if(nonblock){
         release(&pi->lock);
-        return i ? i : -11; // EAGAIN
+        return i ? i : -LINUX_EAGAIN;
       }
       wakeup(&pi->nread);
       sleep(&pi->nwrite, &pi->lock);
@@ -102,35 +105,6 @@ pipewrite(struct pipe *pi, uint64 addr, int n, int nonblock)
         break;
       pi->data[pi->nwrite++ % PIPESIZE] = ch;
       i++;
-    }
-  }
-  wakeup(&pi->nread);
-  release(&pi->lock);
-
-  return i;
-}
-
-int
-pipewrite_kernel(struct pipe *pi, char *buf, int n)
-{
-  int i = 0;
-  struct proc *pr = myproc();
-
-  acquire(&pi->lock);
-  while(i < n){
-    if(pi->readopen == 0 || killed(pr)){
-      release(&pi->lock);
-      return -1;
-    }
-    if(linux_take_interrupt()){
-      release(&pi->lock);
-      return -4; // EINTR
-    }
-    if(pi->nwrite == pi->nread + PIPESIZE){
-      wakeup(&pi->nread);
-      sleep(&pi->nwrite, &pi->lock);
-    } else {
-      pi->data[pi->nwrite++ % PIPESIZE] = buf[i++];
     }
   }
   wakeup(&pi->nread);
@@ -154,11 +128,11 @@ piperead(struct pipe *pi, uint64 addr, int n, int nonblock)
     }
     if(linux_take_interrupt()){
       release(&pi->lock);
-      return -4; // EINTR
+      return -LINUX_EINTR;
     }
     if(nonblock){
       release(&pi->lock);
-      return -11; // EAGAIN
+      return -LINUX_EAGAIN;
     }
     sleep(&pi->nread, &pi->lock); //DOC: piperead-sleep
   }
@@ -171,5 +145,36 @@ piperead(struct pipe *pi, uint64 addr, int n, int nonblock)
   }
   wakeup(&pi->nwrite);  //DOC: piperead-wakeup
   release(&pi->lock);
+  return i;
+}
+
+//kernel write to the pipe, sendfile will use it
+//now no need foe read
+int
+pipewrite_kernel(struct pipe *pi, char *buf, int n)
+{
+  int i = 0;
+  struct proc *pr = myproc();
+
+  acquire(&pi->lock);
+  while(i < n){
+    if(pi->readopen == 0 || killed(pr)){
+      release(&pi->lock);
+      return -1;
+    }
+    if(linux_take_interrupt()){
+      release(&pi->lock);
+      return -LINUX_EINTR;
+    }
+    if(pi->nwrite == pi->nread + PIPESIZE){
+      wakeup(&pi->nread);
+      sleep(&pi->nwrite, &pi->lock);
+    } else {
+      pi->data[pi->nwrite++ % PIPESIZE] = buf[i++];
+    }
+  }
+  wakeup(&pi->nread);
+  release(&pi->lock);
+
   return i;
 }

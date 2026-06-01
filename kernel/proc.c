@@ -9,6 +9,7 @@
 #include "fs.h"
 #include "sleeplock.h"
 #include "file.h"
+#include "linux_errno.h"
 
 struct cpu cpus[NCPU];
 
@@ -491,7 +492,7 @@ void
 proc_mapstacks(pagetable_t kpgtbl)
 {
   struct proc *p;
-  
+
   for(p = proc; p < &proc[NPROC]; p++) {
     uint64 va = KSTACK((int) (p - proc));
     for(int i = 0; i < KSTACK_PAGES; i++){
@@ -508,7 +509,7 @@ void
 procinit(void)
 {
   struct proc *p;
-  
+
   initlock(&pid_lock, "nextpid");
   initlock(&wait_lock, "wait_lock");
   for(p = proc; p < &proc[NPROC]; p++) {
@@ -553,7 +554,7 @@ int
 allocpid()
 {
   int pid;
-  
+
   acquire(&pid_lock);
   pid = nextpid;
   nextpid = nextpid + 1;
@@ -594,7 +595,7 @@ found:
   p->vfs_cwd.mount = vfs_root_mount();
   safestrcpy(p->vfs_cwd.inner, "/", sizeof(p->vfs_cwd.inner));
   safestrcpy(p->vfs_cwd.abs_path, "/", sizeof(p->vfs_cwd.abs_path));
-  
+
   p->trapframe_va = TRAPFRAME_SLOT(p - proc);
   p->is_linux = 0;
   p->linux_signal_pending = 0;
@@ -722,7 +723,7 @@ freeproc(struct proc *p)
   p->vfs_cwd.mount = 0;
   p->vfs_cwd.inner[0] = 0;
   p->vfs_cwd.abs_path[0] = 0;
-  
+
   p->alarm_interval = 0;
   p->alarm_ticks = 0;
   p->alarm_handler = 0;
@@ -737,14 +738,14 @@ linux_interrupt(int tgid, int tid, int sig, int sender)
   struct proc *p;
 
   if(sig < 0 || sig > 64)
-    return -22; // EINVAL
+    return -LINUX_EINVAL;
 
   for(p = proc; p < &proc[NPROC]; p++){
     acquire(&p->lock);
     if(p->pid == tid && p->state != UNUSED){
       if(tgid != 0 && linux_tgid(p) != tgid){
         release(&p->lock);
-        return -3; // ESRCH
+        return -LINUX_ESRCH;
       }
       p->linux_signal_pending = 1;
       if(sig >= 32 && p->linux_in_signal == 0 &&
@@ -760,7 +761,7 @@ linux_interrupt(int tgid, int tid, int sig, int sender)
     }
     release(&p->lock);
   }
-  return -3; // ESRCH
+  return -LINUX_ESRCH;
 }
 
 static int
@@ -803,7 +804,7 @@ linux_kill(int pid, int sig, int sender)
   int matched = 0;
 
   if(sig < 0 || sig > 64)
-    return -22; // EINVAL
+    return -LINUX_EINVAL;
 
   if(pid > 0){
     target_tgid = pid;
@@ -814,7 +815,7 @@ linux_kill(int pid, int sig, int sender)
     target_tgid = -1;
   } else {
     // No process-group model is available for kill(-pgid, sig).
-    return -3; // ESRCH
+    return -LINUX_ESRCH;
   }
 
   for(p = proc; p < &proc[NPROC]; p++){
@@ -827,7 +828,7 @@ linux_kill(int pid, int sig, int sender)
     release(&p->lock);
   }
 
-  return matched ? 0 : -3; // ESRCH
+  return matched ? 0 : -LINUX_ESRCH;
 }
 
 static struct proc *
@@ -1002,11 +1003,11 @@ linux_sigreturn(void)
   char *buf = kalloc();
 
   if(buf == 0)
-    return -12; // ENOMEM
+    return -LINUX_ENOMEM;
   if(copyin(p->pagetable, buf, frame,
             LINUX_SIGINFO_SIZE + LINUX_UC_SIZE) < 0){
     kfree(buf);
-    return -14; // EFAULT
+    return -LINUX_EFAULT;
   }
   linux_get_regs(buf, p->trapframe);
   kfree(buf);
@@ -1215,7 +1216,7 @@ userinit(void)
 
   p = allocproc();
   initproc = p;
-  
+
   p->cwd = namei("/");
 
   p->state = RUNNABLE;
@@ -1263,7 +1264,7 @@ forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, uint64 set_parent_tid,
     return -1;
   }
   pid = np->pid;
-  
+
   if(share_vm){
     proc_freepagetable(np->pagetable, 0, np->trapframe_va);
     np->pagetable = p->pagetable;
@@ -1389,7 +1390,7 @@ forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, uint64 set_parent_tid,
   safestrcpy(np->name, p->name, sizeof(p->name));
 
   release(&np->lock);
-  
+
   acquire(&wait_lock);
   np->parent = p;
   release(&wait_lock);
@@ -1463,7 +1464,7 @@ kexit(int status)
   // Parent might be sleeping in wait().
   if(group_dead)
     wakeup(leader ? leader->parent : p->parent);
-  
+
   acquire(&p->lock);
 
   p->xstate = linux_group_exiting(group) ? linux_group_xstate(group) : status;
@@ -1544,7 +1545,7 @@ kwait(uint64 addr)
       release(&wait_lock);
       return -1;
     }
-    
+
     // Wait for a child to exit.
     sleep(p, &wait_lock);  //DOC: wait-sleep
   }
@@ -1675,7 +1676,7 @@ scheduler(void)
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
-        
+
         swtch(&c->context, &p->context);
 
         // Process is done running for now.
@@ -1774,7 +1775,7 @@ void
 sleep(void *chan, struct spinlock *lk)
 {
   struct proc *p = myproc();
-  
+
   // Must acquire p->lock in order to
   // change p->state and then call sched.
   // Once we hold p->lock, we can be
@@ -1909,7 +1910,7 @@ int
 killed(struct proc *p)
 {
   int k;
-  
+
   acquire(&p->lock);
   k = p->killed;
   release(&p->lock);

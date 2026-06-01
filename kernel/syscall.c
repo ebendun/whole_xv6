@@ -9,6 +9,7 @@
 #include "fs.h"
 #include "sleeplock.h"
 #include "file.h"
+#include "linux_errno.h"
 
 // Fetch the uint64 at addr from the current process.
 int
@@ -84,60 +85,46 @@ argstr(int n, char *buf, int max)
 }
 
 // Prototypes for the functions that handle system calls.
-extern uint64 sys_exit(void);
+// Process and scheduling.
+extern uint64 sys_getpid(void);
 extern uint64 sys_read(void);
 extern uint64 sys_kill(void);
-extern uint64 sys_fstat(void);
-extern uint64 sys_chdir(void);
-extern uint64 sys_dup(void);
-extern uint64 sys_getpid(void);
-extern uint64 sys_sbrk(void);
+extern uint64 sys_exit(void);
 extern uint64 sys_pause(void);
 extern uint64 sys_uptime(void);
-extern uint64 sys_write(void);
+extern uint64 sys_cpupin(void);
+extern uint64 sys_halt(void);
+
+// File system and file descriptors.
+extern uint64 sys_chdir(void);
 extern uint64 sys_close(void);
+extern uint64 sys_dup(void);
+extern uint64 sys_fstat(void);
+extern uint64 sys_write(void);
 extern uint64 sys_linux_close(void);
-extern uint64 sys_interpose(void);
+
+// Memory management.
+extern uint64 sys_sbrk(void);
+extern uint64 sys_munmap(void);
 extern uint64 sys_pgpte(void);
 extern uint64 sys_kpgtbl(void);
+
+// Signals.
 extern uint64 sys_sigalarm(void);
 extern uint64 sys_sigreturn(void);
+
+// Lab extensions.
+extern uint64 sys_interpose(void);
 extern uint64 sys_bind(void);
 extern uint64 sys_unbind(void);
 extern uint64 sys_send(void);
 extern uint64 sys_recv(void);
-extern uint64 sys_cpupin(void);
-extern uint64 sys_halt(void);
-extern uint64 sys_munmap(void);
+
+// Linux compatibility: file system and file descriptors.
 extern uint64 sys_linux_getcwd(void);
-extern uint64 sys_linux_openat(void);
-extern uint64 sys_linux_fstat(void);
-extern uint64 sys_linux_getdents64(void);
-extern uint64 sys_linux_writev(void);
-extern uint64 sys_linux_readv(void);
-extern uint64 sys_linux_lseek(void);
-extern uint64 sys_linux_pread64(void);
-extern uint64 sys_linux_mmap(void);
-extern uint64 sys_linux_mprotect(void);
-extern uint64 sys_linux_madvise(void);
-extern uint64 sys_linux_newfstatat(void);
-extern uint64 sys_linux_brk(void);
-extern uint64 sys_linux_gettid(void);
-extern uint64 sys_linux_getppid(void);
-extern uint64 sys_linux_set_tid_address(void);
-extern uint64 sys_linux_set_robust_list(void);
-extern uint64 sys_linux_get_robust_list(void);
-extern uint64 sys_linux_uname(void);
-extern uint64 sys_linux_getrandom(void);
-extern uint64 sys_linux_exit_group(void);
-extern uint64 sys_linux_execve(void);
-extern uint64 sys_linux_clone(void);
-extern uint64 sys_linux_wait4(void);
-extern uint64 sys_linux_pipe2(void);
 extern uint64 sys_linux_dup3(void);
 extern uint64 sys_linux_fcntl(void);
-extern uint64 sys_linux_sendfile(void);
-extern uint64 sys_linux_ppoll(void);
+extern uint64 sys_linux_ioctl(void);
 extern uint64 sys_linux_mknodat(void);
 extern uint64 sys_linux_mkdirat(void);
 extern uint64 sys_linux_unlinkat(void);
@@ -145,16 +132,40 @@ extern uint64 sys_linux_linkat(void);
 extern uint64 sys_linux_renameat(void);
 extern uint64 sys_linux_mount(void);
 extern uint64 sys_linux_faccessat(void);
+extern uint64 sys_linux_openat(void);
+extern uint64 sys_linux_pipe2(void);
+extern uint64 sys_linux_getdents64(void);
+extern uint64 sys_linux_lseek(void);
+extern uint64 sys_linux_readv(void);
+extern uint64 sys_linux_writev(void);
+extern uint64 sys_linux_pread64(void);
+extern uint64 sys_linux_sendfile(void);
+extern uint64 sys_linux_ppoll(void);
 extern uint64 sys_linux_readlinkat(void);
-extern uint64 sys_linux_gettimeofday(void);
-extern uint64 sys_linux_clock_gettime(void);
+extern uint64 sys_linux_newfstatat(void);
+extern uint64 sys_linux_fstat(void);
+extern uint64 sys_linux_statfs(void);
+extern uint64 sys_linux_utimensat(void);
+
+// Linux compatibility: process, scheduling, and identity.
+extern uint64 sys_linux_gettid(void);
+extern uint64 sys_linux_getppid(void);
+extern uint64 sys_linux_set_tid_address(void);
+extern uint64 sys_linux_exit_group(void);
+extern uint64 sys_linux_execve(void);
+extern uint64 sys_linux_clone(void);
+extern uint64 sys_linux_wait4(void);
 extern uint64 sys_linux_times(void);
 extern uint64 sys_linux_sched_yield(void);
-extern uint64 sys_linux_nanosleep(void);
-extern uint64 sys_linux_clock_nanosleep(void);
-extern uint64 sys_linux_syslog(void);
-extern uint64 sys_linux_sysinfo(void);
-extern uint64 sys_linux_ioctl(void);
+extern uint64 sys_linux_setsid(void);
+
+// Linux compatibility: memory management.
+extern uint64 sys_linux_brk(void);
+extern uint64 sys_linux_mmap(void);
+extern uint64 sys_linux_mprotect(void);
+extern uint64 sys_linux_madvise(void);
+
+// Linux compatibility: signals and process limits.
 extern uint64 sys_linux_rt_sigtimedwait(void);
 extern uint64 sys_linux_rt_sigaction(void);
 extern uint64 sys_linux_rt_sigprocmask(void);
@@ -163,10 +174,21 @@ extern uint64 sys_linux_tgkill(void);
 extern uint64 sys_linux_tkill(void);
 extern uint64 sys_linux_kill(void);
 extern uint64 sys_linux_prlimit64(void);
-extern uint64 sys_linux_setsid(void);
-extern uint64 sys_linux_statfs(void);
+
+// Linux compatibility: time, system info, and miscellaneous.
 extern uint64 sys_linux_futex(void);
-extern uint64 sys_linux_utimensat(void);
+extern uint64 sys_linux_set_robust_list(void);
+extern uint64 sys_linux_get_robust_list(void);
+extern uint64 sys_linux_uname(void);
+extern uint64 sys_linux_getrandom(void);
+extern uint64 sys_linux_gettimeofday(void);
+extern uint64 sys_linux_clock_gettime(void);
+extern uint64 sys_linux_nanosleep(void);
+extern uint64 sys_linux_clock_nanosleep(void);
+extern uint64 sys_linux_syslog(void);
+extern uint64 sys_linux_sysinfo(void);
+
+// Linux compatibility: sockets.
 extern uint64 sys_linux_socket(void);
 extern uint64 sys_linux_bind(void);
 extern uint64 sys_linux_listen(void);
@@ -187,7 +209,7 @@ sys_linux_success(void)
 static uint64
 sys_linux_enosys(void)
 {
-  return -38;
+  return -LINUX_ENOSYS;
 }
 
 struct syscall_entry {
@@ -197,6 +219,7 @@ struct syscall_entry {
 
 static struct syscall_entry linux_syscalls[] = {
   // Linux ABI syscall table: numbers match RISC-V Linux user binaries.
+  // File system and file descriptors.
   {SYS_getcwd, sys_linux_getcwd},
   {SYS_dup, sys_dup},
   {SYS_dup3, sys_linux_dup3},
@@ -226,33 +249,20 @@ static struct syscall_entry linux_syscalls[] = {
   {SYS_readlinkat, sys_linux_readlinkat},
   {SYS_newfstatat, sys_linux_newfstatat},
   {SYS_fstat, sys_linux_fstat},
+  {SYS_statfs, sys_linux_statfs},
   {SYS_utimensat, sys_linux_utimensat},
+
+  // Process, scheduling, and identity.
   {SYS_exit, sys_exit},
   {SYS_exit_group, sys_linux_exit_group},
   {SYS_set_tid_address, sys_linux_set_tid_address},
-  {SYS_futex, sys_linux_futex},
-  {SYS_set_robust_list, sys_linux_set_robust_list},
-  {SYS_get_robust_list, sys_linux_get_robust_list},
-  {SYS_nanosleep, sys_linux_nanosleep},
-  {SYS_clock_gettime, sys_linux_clock_gettime},
-  {SYS_clock_nanosleep, sys_linux_clock_nanosleep},
-  {SYS_syslog, sys_linux_syslog},
   {SYS_sched_yield, sys_linux_sched_yield},
-  {SYS_kill, sys_linux_kill},
-  {SYS_rt_sigreturn, sys_linux_rt_sigreturn},
-  {SYS_tkill, sys_linux_tkill},
-  {SYS_tgkill, sys_linux_tgkill},
-  {SYS_rt_sigaction, sys_linux_rt_sigaction},
-  {SYS_rt_sigprocmask, sys_linux_rt_sigprocmask},
-  {SYS_rt_sigtimedwait, sys_linux_rt_sigtimedwait},
   {SYS_setregid, sys_linux_success},
   {SYS_setgid, sys_linux_success},
   {SYS_setreuid, sys_linux_success},
   {SYS_setuid, sys_linux_success},
   {SYS_times, sys_linux_times},
   {SYS_setsid, sys_linux_setsid},
-  {SYS_uname, sys_linux_uname},
-  {SYS_gettimeofday, sys_linux_gettimeofday},
   {SYS_getpid, sys_getpid},
   {SYS_getppid, sys_linux_getppid},
   {SYS_getuid, sys_linux_success},
@@ -260,7 +270,43 @@ static struct syscall_entry linux_syscalls[] = {
   {SYS_getgid, sys_linux_success},
   {SYS_getegid, sys_linux_success},
   {SYS_gettid, sys_linux_gettid},
+  {SYS_clone, sys_linux_clone},
+  {SYS_execve, sys_linux_execve},
+  {SYS_wait4, sys_linux_wait4},
+
+  // Memory management.
+  {SYS_brk, sys_linux_brk},
+  {SYS_munmap, sys_munmap},
+  {SYS_mremap, sys_linux_enosys},
+  {SYS_mmap, sys_linux_mmap},
+  {SYS_mprotect, sys_linux_mprotect},
+  {SYS_madvise, sys_linux_madvise},
+
+  // Signals and process limits.
+  {SYS_kill, sys_linux_kill},
+  {SYS_tkill, sys_linux_tkill},
+  {SYS_tgkill, sys_linux_tgkill},
+  {SYS_rt_sigaction, sys_linux_rt_sigaction},
+  {SYS_rt_sigprocmask, sys_linux_rt_sigprocmask},
+  {SYS_rt_sigtimedwait, sys_linux_rt_sigtimedwait},
+  {SYS_rt_sigreturn, sys_linux_rt_sigreturn},
+  {SYS_prlimit64, sys_linux_prlimit64},
+
+  // Time, system info, and miscellaneous.
+  {SYS_futex, sys_linux_futex},
+  {SYS_set_robust_list, sys_linux_set_robust_list},
+  {SYS_get_robust_list, sys_linux_get_robust_list},
+  {SYS_nanosleep, sys_linux_nanosleep},
+  {SYS_clock_gettime, sys_linux_clock_gettime},
+  {SYS_clock_nanosleep, sys_linux_clock_nanosleep},
+  {SYS_syslog, sys_linux_syslog},
+  {SYS_uname, sys_linux_uname},
+  {SYS_gettimeofday, sys_linux_gettimeofday},
   {SYS_sysinfo, sys_linux_sysinfo},
+  {SYS_getrandom, sys_linux_getrandom},
+  {SYS_rseq, sys_linux_success},
+
+  // Sockets.
   {SYS_socket, sys_linux_socket},
   {SYS_bind_linux, sys_linux_bind},
   {SYS_listen, sys_linux_listen},
@@ -270,38 +316,34 @@ static struct syscall_entry linux_syscalls[] = {
   {SYS_sendto, sys_linux_sendto},
   {SYS_recvfrom, sys_linux_recvfrom},
   {SYS_setsockopt, sys_linux_setsockopt},
-  {SYS_brk, sys_linux_brk},
-  {SYS_munmap, sys_munmap},
-  {SYS_mremap, sys_linux_enosys},
-  {SYS_clone, sys_linux_clone},
-  {SYS_execve, sys_linux_execve},
-  {SYS_mmap, sys_linux_mmap},
-  {SYS_mprotect, sys_linux_mprotect},
-  {SYS_madvise, sys_linux_madvise},
-  {SYS_wait4, sys_linux_wait4},
-  {SYS_prlimit64, sys_linux_prlimit64},
-  {SYS_statfs, sys_linux_statfs},
+
+  // Aliases and compatibility-only success stubs.
   {SYS_renameat2, sys_linux_renameat},
-  {SYS_getrandom, sys_linux_getrandom},
-  {SYS_rseq, sys_linux_success},
 };
 
 static struct syscall_entry xv6_syscalls[] = {
   // xv6/lab private syscall table: numbers live outside Linux's range.
+  // Memory management and VM inspection.
   {SYS_sbrk, sys_sbrk},
-  {SYS_pause, sys_pause},
-  {SYS_uptime, sys_uptime},
-  {SYS_interpose, sys_interpose},
   {SYS_pgpte, sys_pgpte},
   {SYS_kpgtbl, sys_kpgtbl},
+
+  // Process and scheduling.
+  {SYS_pause, sys_pause},
+  {SYS_uptime, sys_uptime},
+  {SYS_cpupin, sys_cpupin},
+  {SYS_halt, sys_halt},
+
+  // Signals.
   {SYS_sigalarm, sys_sigalarm},
   {SYS_sigreturn, sys_sigreturn},
+
+  // Interposition and local IPC.
+  {SYS_interpose, sys_interpose},
   {SYS_bind, sys_bind},
   {SYS_unbind, sys_unbind},
   {SYS_send, sys_send},
   {SYS_recv, sys_recv},
-  {SYS_cpupin, sys_cpupin},
-  {SYS_halt, sys_halt},
 };
 
 static uint64 (*syscall_lookup(int num))(void)
