@@ -752,7 +752,7 @@ sys_linux_futex(void)
   argint(5, &val3);
   rawop = op;
   realtime = (rawop & FUTEX_CLOCK_REALTIME) != 0;
-  op &= ~FUTEX_PRIVATE_FLAG;
+  op &= ~(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
   bitset = (op == 9 || op == 10) ? (uint)val3 : 0xffffffffU;
   if((op == 9 || op == 10) && bitset == 0)
     return -22; // EINVAL
