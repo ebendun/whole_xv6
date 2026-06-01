@@ -24,7 +24,6 @@ struct file {
   char readable;
   char writable;
   struct vfs_ops *vfs_ops;
-  int fd_flags;
   int status_flags;
   int has_time;
   uint64 atime_sec;

@@ -161,6 +161,7 @@ extern uint64 sys_linux_rt_sigprocmask(void);
 extern uint64 sys_linux_rt_sigreturn(void);
 extern uint64 sys_linux_tgkill(void);
 extern uint64 sys_linux_tkill(void);
+extern uint64 sys_linux_kill(void);
 extern uint64 sys_linux_prlimit64(void);
 extern uint64 sys_linux_setsid(void);
 extern uint64 sys_linux_statfs(void);
@@ -237,7 +238,7 @@ static struct syscall_entry linux_syscalls[] = {
   {SYS_clock_nanosleep, sys_linux_clock_nanosleep},
   {SYS_syslog, sys_linux_syslog},
   {SYS_sched_yield, sys_linux_sched_yield},
-  {SYS_kill, sys_kill},
+  {SYS_kill, sys_linux_kill},
   {SYS_rt_sigreturn, sys_linux_rt_sigreturn},
   {SYS_tkill, sys_linux_tkill},
   {SYS_tgkill, sys_linux_tgkill},

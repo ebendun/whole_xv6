@@ -517,14 +517,22 @@ sys_linux_gettimeofday(void)
 {
   // Return wall time derived from the sdcard ext4 timestamp plus uptime.
   uint64 addr;
+  uint64 tzaddr;
   uint64 tv[2];
+  int tz[2];
   uint64 nsec;
 
   argaddr(0, &addr);
+  argaddr(1, &tzaddr);
   linux_wall_timespec(&tv[0], &nsec);
   tv[1] = nsec / 1000;
-  if(copyout(myproc()->pagetable, addr, (char *)tv, sizeof(tv)) < 0)
-    return -1;
+  if(addr && copyout(myproc()->pagetable, addr, (char *)tv, sizeof(tv)) < 0)
+    return -14; // EFAULT
+  if(tzaddr){
+    memset(tz, 0, sizeof(tz));
+    if(copyout(myproc()->pagetable, tzaddr, (char *)tz, sizeof(tz)) < 0)
+      return -14; // EFAULT
+  }
   return 0;
 }
 
@@ -1088,6 +1096,18 @@ sys_kill(void)
 
   argint(0, &pid);
   return kkill(pid);
+}
+
+uint64
+sys_linux_kill(void)
+{
+  // Linux kill(pid, sig).  Signal 0 only checks for a matching target.
+  int pid;
+  int sig;
+
+  argint(0, &pid);
+  argint(1, &sig);
+  return linux_kill(pid, sig, myproc()->pid);
 }
 
 // return how many clock tick interrupts have occurred

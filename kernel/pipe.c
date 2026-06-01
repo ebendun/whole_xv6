@@ -74,7 +74,7 @@ pipeclose(struct pipe *pi, int writable)
 }
 
 int
-pipewrite(struct pipe *pi, uint64 addr, int n)
+pipewrite(struct pipe *pi, uint64 addr, int n, int nonblock)
 {
   int i = 0;
   struct proc *pr = myproc();
@@ -90,6 +90,10 @@ pipewrite(struct pipe *pi, uint64 addr, int n)
       return -4; // EINTR
     }
     if(pi->nwrite == pi->nread + PIPESIZE){ //DOC: pipewrite-full
+      if(nonblock){
+        release(&pi->lock);
+        return i ? i : -11; // EAGAIN
+      }
       wakeup(&pi->nread);
       sleep(&pi->nwrite, &pi->lock);
     } else {
@@ -136,7 +140,7 @@ pipewrite_kernel(struct pipe *pi, char *buf, int n)
 }
 
 int
-piperead(struct pipe *pi, uint64 addr, int n)
+piperead(struct pipe *pi, uint64 addr, int n, int nonblock)
 {
   int i;
   struct proc *pr = myproc();
@@ -151,6 +155,10 @@ piperead(struct pipe *pi, uint64 addr, int n)
     if(linux_take_interrupt()){
       release(&pi->lock);
       return -4; // EINTR
+    }
+    if(nonblock){
+      release(&pi->lock);
+      return -11; // EAGAIN
     }
     sleep(&pi->nread, &pi->lock); //DOC: piperead-sleep
   }

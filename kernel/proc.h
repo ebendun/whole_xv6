@@ -28,18 +28,13 @@ struct cpu {
 
 extern struct cpu cpus[NCPU];
 
-// per-process data for the trap handling code in trampoline.S.
-// sits in a page by itself just under the trampoline page in the
-// user page table. not specially mapped in the kernel page table.
-// uservec in trampoline.S saves user registers in the trapframe,
-// then initializes registers from the trapframe's
-// kernel_sp, kernel_hartid, kernel_satp, and jumps to kernel_trap.
-// usertrapret() and userret in trampoline.S set up
-// the trapframe's kernel_*, restore user registers from the
-// trapframe, switch to the user page table, and enter user space.
-// the trapframe includes callee-saved user registers like s0-s11 because the
-// return-to-user path via usertrapret() doesn't return through
-// the entire kernel call stack.
+// Per-process data for the trap handling code in trampoline.S.
+//
+// This page sits just below the trampoline page in the user page table,
+// and is not specially mapped in the kernel page table.  uservec saves
+// user registers here, loads kernel_* state, and jumps to usertrap().
+// usertrapret() and userret restore these registers and return to user
+// space.  Keep the offsets below in sync with trampoline.S.
 struct trapframe {
   /*   0 */ uint64 kernel_satp;   // kernel page table
   /*   8 */ uint64 kernel_sp;     // top of process's kernel stack
@@ -79,18 +74,27 @@ struct trapframe {
   /* 280 */ uint64 t6;
 };
 
-enum procstate { UNUSED, USED, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
+enum procstate {
+  UNUSED,
+  USED,
+  SLEEPING,
+  RUNNABLE,
+  RUNNING,
+  ZOMBIE,
+};
 
 struct usyscall;
 
 struct vma {
   int used;
+  int prot;
+  int flags;
+
   uint64 addr;
   uint64 len;
   uint64 filelen;
-  int prot;
-  int flags;
   uint64 offset;
+
   struct file *f;
 };
 
@@ -99,21 +103,25 @@ struct vfs_mount;
 struct linux_mm {
   struct spinlock lock;
   int refcnt;
+
   pagetable_t pagetable;
   uint64 sz;
   uint64 linux_brk;
   uint64 linux_brk_limit;
   uint64 mmap_base;
+
   struct vma vmas[NVMA];
 };
 
 struct linux_thread_group {
   struct spinlock lock;
   int refcnt;
+
   int tgid;
   int exiting;
   int xstate;
   int thread_count;
+
   struct proc *leader;
   struct proc *members;
 };
@@ -124,70 +132,77 @@ struct proc_vfs_path {
   char abs_path[MAXPATH];
 };
 
-
-// Per-process state
+// Per-process state.
 struct proc {
   struct spinlock lock;
 
-  // p->lock must be held when using these:
-  enum procstate state;        // Process state
-  void *chan;                  // If non-zero, sleeping on chan
-  uint futex_bitset;           // FUTEX_WAIT_BITSET mask
-  uint futex_deadline;         // tick deadline for timed futex sleep
-  int futex_timedout;          // timed futex sleep expired
-  int killed;                  // If non-zero, have been killed
-  int xstate;                  // Exit status to be returned to parent's wait
-  int pid;                     // Process ID
+  // Protected by p->lock.
+  enum procstate state;       // Process state.
+  void *chan;                 // Sleep channel, or zero.
+  int killed;                 // Non-zero if killed.
+  int xstate;                 // Exit status returned to wait().
+  int pid;                    // Process ID.
 
-  // wait_lock must be held when using this:
-  struct proc *parent;         // Parent process
+  uint futex_bitset;          // FUTEX_WAIT_BITSET mask.
+  uint futex_deadline;        // Tick deadline for timed futex sleep.
+  int futex_timedout;         // Timed futex sleep expired.
 
-  // these are private to the process, so p->lock need not be held.
-  uint64 kstack;               // Virtual address of kernel stack
-  int is_linux;                // Process is running a Linux ABI image
-  int linux_signal_pending;    // Linux-ABI signal interrupt for blocking syscalls
-  int linux_pending_signal;    // Linux signal to deliver before user return
-  int linux_pending_sender;    // Sender pid for pending Linux signal
-  int linux_in_signal;         // currently running a Linux signal handler
+  // Protected by wait_lock.
+  struct proc *parent;        // Parent process.
 
-  //for clone
-  int linux_share_vm;          // Linux CLONE_VM-style shared user memory
-  int linux_share_files;       // Linux CLONE_FILES-style shared fd table
-  int linux_share_fs;          // Linux CLONE_FS-style shared cwd/root state
+  // Private to this process; p->lock is not required.
+  uint64 kstack;              // Virtual address of kernel stack.
+  pagetable_t pagetable;      // User page table.
+  struct trapframe *trapframe; // Data page for trampoline.S.
+  uint64 trapframe_va;        // Per-thread trapframe slot in user page table.
+  struct context context;     // swtch() here to run process.
 
-  int linux_is_thread;         // Linux CLONE_THREAD-style task
-  struct linux_thread_group *linux_group; // Linux thread-group membership
-  struct proc *linux_group_next; // next task in linux_group members list
-  uint64 linux_rt_signal_handler; // handler installed for Linux rt signals
-  uint64 linux_sigmask;        // Linux blocked signal mask
-  char linux_exe_path[MAXPATH]; // Absolute Linux-visible executable path
-  struct linux_mm *mm;          // Linux-style shared address space metadata
-  pagetable_t pagetable;       // User page table
-  struct trapframe *trapframe; // data page for trampoline.S
-  uint64 trapframe_va;         // per-thread trapframe slot in the user page table
-  char *sigreturn;             // user executable rt_sigreturn stub
-  struct context context;      // swtch() here to run process
-  struct file *ofile[NOFILE];  // Open files
-  struct inode *cwd;           // Current directory
-  struct proc_vfs_path vfs_root;// Process root in VFS terms
-  struct proc_vfs_path vfs_cwd; // Current directory in VFS terms
-  char name[16];               // Process name (debugging)
+  struct file *ofile[NOFILE]; // Open files.
+  int ofd_flags[NOFILE];      // Per-fd flags such as FD_CLOEXEC.
+  struct inode *cwd;          // Current directory.
+  struct proc_vfs_path vfs_root; // Process root in VFS terms.
+  struct proc_vfs_path vfs_cwd;  // Current directory in VFS terms.
+  char name[16];              // Process name for debugging.
   struct cpu *pincpu;
-  uint64 clear_child_tid;      // Linux CLONE_CHILD_CLEARTID futex address
-  uint64 robust_list;          // Linux robust futex list head
-  uint64 robust_list_len;      // Length supplied to set_robust_list
-  
-  //for page tables lab
-  struct usyscall *usyscall;   // shared user/kernel page
 
-  //for syscall lab
-  int interpose_mask;          // Bit mask of blocked syscalls
-  char interpose_path[MAXPATH];// Allowed path for masked open/exec
+  // Linux ABI state.
+  int is_linux;               // Running a Linux ABI image.
+  struct linux_mm *mm;        // Shared address-space metadata.
+  char linux_exe_path[MAXPATH]; // Absolute Linux-visible executable path.
 
-  //for trap lab
-  struct trapframe alarm_trapframe; // saved user registers for sigalarm
-  int alarm_interval;          // ticks between alarms
-  int alarm_ticks;             // ticks since last alarm
-  uint64 alarm_handler;        // user handler pc
-  int alarm_inflight;          // handler active
+  // Linux clone/thread sharing.
+  int linux_share_vm;         // CLONE_VM-style shared user memory.
+  int linux_share_files;      // CLONE_FILES-style shared fd table.
+  int linux_share_fs;         // CLONE_FS-style shared cwd/root state.
+  int linux_is_thread;        // CLONE_THREAD-style task.
+  struct linux_thread_group *linux_group;
+  struct proc *linux_group_next;
+
+  // Linux signals.
+  int linux_signal_pending;   // Interrupt blocking syscalls.
+  int linux_pending_signal;   // Signal to deliver before user return.
+  int linux_pending_sender;   // Sender pid for pending signal.
+  int linux_in_signal;        // Currently running a signal handler.
+  uint64 linux_rt_signal_handler;
+  uint64 linux_sigmask;       // Blocked signal mask.
+  char *sigreturn;            // User executable rt_sigreturn stub.
+
+  // Linux futex cleanup.
+  uint64 clear_child_tid;     // CLONE_CHILD_CLEARTID futex address.
+  uint64 robust_list;         // Robust futex list head.
+  uint64 robust_list_len;     // Length supplied to set_robust_list().
+
+  // Page-table lab.
+  struct usyscall *usyscall;  // Shared user/kernel page.
+
+  // Syscall lab.
+  int interpose_mask;         // Bit mask of blocked syscalls.
+  char interpose_path[MAXPATH]; // Allowed path for masked open/exec.
+
+  // Trap lab.
+  struct trapframe alarm_trapframe; // Saved user registers for sigalarm.
+  int alarm_interval;         // Ticks between alarms.
+  int alarm_ticks;            // Ticks since last alarm.
+  uint64 alarm_handler;       // User handler pc.
+  int alarm_inflight;         // Handler active.
 };

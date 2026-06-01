@@ -360,6 +360,14 @@ kexec(char *path, char **argv)
   p->trapframe->epc = entry;  // initial program counter
   p->trapframe->sp = sp; // initial stack pointer
   proc_freepagetable(oldpagetable, oldsz, p->trapframe_va);
+  for(i = 0; i < NOFILE; i++){
+    if(p->ofile[i] && (p->ofd_flags[i] & 1)){
+      struct file *f = p->ofile[i];
+      p->ofile[i] = 0;
+      p->ofd_flags[i] = 0;
+      fileclose(f);
+    }
+  }
 
   // xv6 programs enter main(argc, argv). Linux ABI programs enter _start;
   // on RISC-V a0 is rtld_fini, so keep it null and let _start read argc

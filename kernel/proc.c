@@ -366,6 +366,7 @@ proc_close_files(struct proc *p)
     if(p->ofile[fd]){
       struct file *f = p->ofile[fd];
       p->ofile[fd] = 0;
+      p->ofd_flags[fd] = 0;
       fileclose(f);
     }
   }
@@ -398,6 +399,7 @@ linux_sync_fd_to_group(struct proc *src, int fd)
       fileclose(q->ofile[fd]);
       q->ofile[fd] = 0;
     }
+    q->ofd_flags[fd] = src->ofd_flags[fd];
     if(src->ofile[fd])
       q->ofile[fd] = filedup(src->ofile[fd]);
   }
@@ -759,6 +761,73 @@ linux_interrupt(int tgid, int tid, int sig, int sender)
     release(&p->lock);
   }
   return -3; // ESRCH
+}
+
+static int
+linux_signal_ignored(int sig)
+{
+  // These default actions are ignored by Linux.  Job-control stop/continue
+  // behavior is not modeled, but SIGCONT should not kill the task.
+  return sig == 17 || sig == 18 || sig == 23 || sig == 28;
+}
+
+static void
+linux_signal_process_locked(struct proc *p, int sig, int sender)
+{
+  if(sig == 0)
+    return;
+
+  if(sig >= 32 && p->linux_in_signal == 0 &&
+     p->linux_rt_signal_handler &&
+     p->linux_pending_signal == 0){
+    p->linux_signal_pending = 1;
+    p->linux_pending_signal = sig;
+    p->linux_pending_sender = sender;
+  } else if(linux_signal_ignored(sig)){
+    return;
+  } else {
+    p->killed = 1;
+    p->linux_signal_pending = 1;
+  }
+
+  if(p->state == SLEEPING)
+    p->state = RUNNABLE;
+}
+
+int
+linux_kill(int pid, int sig, int sender)
+{
+  struct proc *p;
+  struct proc *cur = myproc();
+  int target_tgid;
+  int matched = 0;
+
+  if(sig < 0 || sig > 64)
+    return -22; // EINVAL
+
+  if(pid > 0){
+    target_tgid = pid;
+  } else if(pid == 0){
+    // xv6 does not track process groups; use the caller's thread group.
+    target_tgid = linux_tgid(cur);
+  } else if(pid == -1){
+    target_tgid = -1;
+  } else {
+    // No process-group model is available for kill(-pgid, sig).
+    return -3; // ESRCH
+  }
+
+  for(p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->state != UNUSED &&
+       (target_tgid == -1 || linux_tgid(p) == target_tgid)){
+      matched = 1;
+      linux_signal_process_locked(p, sig, sender);
+    }
+    release(&p->lock);
+  }
+
+  return matched ? 0 : -3; // ESRCH
 }
 
 static struct proc *
@@ -1243,9 +1312,12 @@ forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, uint64 set_parent_tid,
   }
 
   // increment reference counts on open file descriptors.
-  for(i = 0; i < NOFILE; i++)
-    if(p->ofile[i])
+  for(i = 0; i < NOFILE; i++){
+    if(p->ofile[i]){
       np->ofile[i] = filedup(p->ofile[i]);
+      np->ofd_flags[i] = p->ofd_flags[i];
+    }
+  }
   np->cwd = idup(p->cwd);
   np->vfs_root.mount = p->vfs_root.mount;
   safestrcpy(np->vfs_root.inner, p->vfs_root.inner, sizeof(np->vfs_root.inner));

@@ -145,6 +145,7 @@ fdalloc(struct file *f)
       break;
     if(p->ofile[fd] == 0){
       p->ofile[fd] = f;
+      p->ofd_flags[fd] = 0;
       linux_sync_file_table(p);
       return fd;
     }
@@ -253,19 +254,22 @@ sys_linux_dup3(void)
   argint(0, &oldfd);
   argint(1, &newfd);
   argint(2, &flags);
-  (void)flags;
 
   if(oldfd < 0 || oldfd >= NOFILE || newfd < 0 || newfd >= NOFILE)
-    return -1;
+    return -9; // EBADF
+  if(flags & ~02000000)
+    return -22; // EINVAL
   if(oldfd == newfd)
-    return newfd;
+    return -22; // EINVAL
   if((f = p->ofile[oldfd]) == 0)
-    return -1;
+    return -9; // EBADF
   if(p->ofile[newfd]){
     fileclose(p->ofile[newfd]);
     p->ofile[newfd] = 0;
+    p->ofd_flags[newfd] = 0;
   }
   p->ofile[newfd] = filedup(f);
+  p->ofd_flags[newfd] = (flags & 02000000) ? 1 : 0; // O_CLOEXEC
   linux_sync_file_table(p);
   return newfd;
 }
@@ -293,15 +297,17 @@ sys_linux_fcntl(void)
     for(int newfd = arg; newfd < NOFILE; newfd++){
       if(p->ofile[newfd] == 0){
         p->ofile[newfd] = filedup(f);
+        p->ofd_flags[newfd] = (cmd == 1030) ? 1 : 0;
         linux_sync_file_table(p);
         return newfd;
       }
     }
     return -1;
   case 1:  // F_GETFD
-    return f->fd_flags;
+    return p->ofd_flags[fd];
   case 2:  // F_SETFD
-    f->fd_flags = arg;
+    p->ofd_flags[fd] = arg & 1;
+    linux_sync_file_table(p);
     return 0;
   case 3:  // F_GETFL
     if(f->readable && f->writable)
@@ -341,8 +347,6 @@ sys_linux_socket(void)
   f->sock_domain = domain;
   f->sock_type = type;
   f->sock_proto = proto;
-  if(type & 02000000)
-    f->fd_flags |= 1; // FD_CLOEXEC
   if(type & 04000)
     f->status_flags |= 04000; // O_NONBLOCK
   f->sock_listening = 0;
@@ -356,6 +360,10 @@ sys_linux_socket(void)
   if((fd = fdalloc(f)) < 0){
     fileclose(f);
     return -24; // EMFILE
+  }
+  if(type & 02000000){
+    myproc()->ofd_flags[fd] = 1; // FD_CLOEXEC
+    linux_sync_file_table(myproc());
   }
   return fd;
 }
@@ -639,6 +647,7 @@ sys_close(void)
   if(argfd(0, &fd, &f) < 0)
     return -1;
   myproc()->ofile[fd] = 0;
+  myproc()->ofd_flags[fd] = 0;
   linux_sync_file_table(myproc());
   fileclose(f);
   return 0;
@@ -657,6 +666,7 @@ sys_linux_close(void)
     return -9; // EBADF
   }
   p->ofile[fd] = 0;
+  p->ofd_flags[fd] = 0;
   linux_sync_file_table(p);
   fileclose(f);
   return 0;
@@ -2274,13 +2284,12 @@ sys_pipe(void)
     return -1;
   fd0 = -1;
   if((fd0 = fdalloc(rf)) < 0 || (fd1 = fdalloc(wf)) < 0){
-    if(fd0 >= 0){
+    if(fd0 >= 0)
       p->ofile[fd0] = 0;
-      rf = 0;
-    }
+    if(fd0 >= 0)
+      p->ofd_flags[fd0] = 0;
     linux_sync_file_table(p);
-    if(rf)
-      fileclose(rf);
+    fileclose(rf);
     fileclose(wf);
     return -1;
   }
@@ -2288,7 +2297,11 @@ sys_pipe(void)
      copyout(p->pagetable, fdarray+sizeof(fd0), (char *)&fd1, sizeof(fd1)) < 0){
     p->ofile[fd0] = 0;
     p->ofile[fd1] = 0;
+    p->ofd_flags[fd0] = 0;
+    p->ofd_flags[fd1] = 0;
     linux_sync_file_table(p);
+    fileclose(rf);
+    fileclose(wf);
     return -1;
   }
   return 0;
@@ -2297,6 +2310,52 @@ sys_pipe(void)
 uint64
 sys_linux_pipe2(void)
 {
-  // Linux pipe2 subset; flags are ignored.
-  return sys_pipe();
+  // Create a pipe with Linux pipe2 flags.
+  uint64 fdarray;
+  struct file *rf, *wf;
+  int fd0, fd1;
+  int flags;
+  struct proc *p = myproc();
+
+  argaddr(0, &fdarray);
+  argint(1, &flags);
+
+  if(flags & ~(02000000 | 04000))
+    return -22; // EINVAL
+
+  if(pipealloc(&rf, &wf) < 0)
+    return -24; // EMFILE
+  if(flags & 04000){ // O_NONBLOCK
+    rf->status_flags |= 04000;
+    wf->status_flags |= 04000;
+  }
+
+  fd0 = -1;
+  if((fd0 = fdalloc(rf)) < 0 || (fd1 = fdalloc(wf)) < 0){
+    if(fd0 >= 0)
+      p->ofile[fd0] = 0;
+    if(fd0 >= 0)
+      p->ofd_flags[fd0] = 0;
+    linux_sync_file_table(p);
+    fileclose(rf);
+    fileclose(wf);
+    return -24; // EMFILE
+  }
+  if(flags & 02000000){ // O_CLOEXEC
+    p->ofd_flags[fd0] = 1;
+    p->ofd_flags[fd1] = 1;
+    linux_sync_file_table(p);
+  }
+  if(copyout(p->pagetable, fdarray, (char*)&fd0, sizeof(fd0)) < 0 ||
+     copyout(p->pagetable, fdarray+sizeof(fd0), (char *)&fd1, sizeof(fd1)) < 0){
+    p->ofile[fd0] = 0;
+    p->ofile[fd1] = 0;
+    p->ofd_flags[fd0] = 0;
+    p->ofd_flags[fd1] = 0;
+    linux_sync_file_table(p);
+    fileclose(rf);
+    fileclose(wf);
+    return -14; // EFAULT
+  }
+  return 0;
 }

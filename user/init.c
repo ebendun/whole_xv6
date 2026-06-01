@@ -32,6 +32,7 @@ run_test(struct test_entry *test)
 {
   char *argv[] = { test->script, 0 };
   int pid;
+  int wpid;
   int fd;
 
   if(chdir(test->dir) < 0){
@@ -56,7 +57,10 @@ run_test(struct test_entry *test)
     printf("init: exec %s/%s failed\n", test->dir, test->script);
     exit(1);
   }
-  wait((int *)0);
+  while((wpid = wait((int *)0)) >= 0 && wpid != pid)
+    ;
+  while(wait((int *)0) >= 0)
+    ;
 }
 #endif
 

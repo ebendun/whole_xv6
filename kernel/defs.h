@@ -84,8 +84,8 @@ void            end_op(void);
 // pipe.c
 int             pipealloc(struct file**, struct file**);
 void            pipeclose(struct pipe*, int);
-int             piperead(struct pipe*, uint64, int);
-int             pipewrite(struct pipe*, uint64, int);
+int             piperead(struct pipe*, uint64, int, int);
+int             pipewrite(struct pipe*, uint64, int, int);
 int             pipewrite_kernel(struct pipe*, char*, int);
 
 // printf.c
@@ -104,6 +104,7 @@ int             linux_reset_thread_group(struct proc *);
 void            linux_sync_file_table(struct proc *);
 void            linux_futex_wake(uint64);
 int             linux_interrupt(int, int, int, int);
+int             linux_kill(int, int, int);
 void            linux_set_rt_signal_handler(uint64);
 void            linux_deliver_signal(void);
 uint64          linux_sigreturn(void);
