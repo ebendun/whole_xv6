@@ -135,6 +135,7 @@ kexec(char *path, char **argv)
   pagetable_t pagetable = 0, oldpagetable;
   struct proc *p = myproc();
   int ret;
+  int reset_group;
 
   st = (struct exec_state *)kalloc();
   if(st == 0)
@@ -214,18 +215,20 @@ kexec(char *path, char **argv)
   }
 
   p = myproc();
-  uint64 oldsz = p->sz;
+  uint64 oldsz = p->mm ? p->mm->sz : 0;
+  uint64 linux_brk = 0;
+  uint64 linux_brk_limit = 0;
 
   // Allocate some pages at the next page boundary.
   // Make the first inaccessible as a stack guard.
   // Use the rest as the user stack.
   sz = PGROUNDUP(sz);
   if(is_ext4)
-    p->linux_brk = app_brk;
+    linux_brk = app_brk;
   if(is_ext4)
     sz += has_interp ? 16 * PGSIZE : 4096 * PGSIZE;
   if(is_ext4)
-    p->linux_brk_limit = has_interp ? at_base : sz;
+    linux_brk_limit = has_interp ? at_base : sz;
   stack_pages = is_ext4 ? 16 : USERSTACK;
   uint64 sz1;
   if((sz1 = uvmalloc(pagetable, sz, sz + (stack_pages+1)*PGSIZE, PTE_W)) == 0)
@@ -308,6 +311,7 @@ kexec(char *path, char **argv)
   safestrcpy(p->name, last, sizeof(p->name));
     
   // Commit to the user image.
+  reset_group = p->is_linux;
   if(p->is_linux){
     for(struct proc *q = proc; q < &proc[NPROC]; q++){
       if(q == p || q->state == UNUSED || linux_tgid(q) != linux_tgid(p))
@@ -319,16 +323,10 @@ kexec(char *path, char **argv)
       release(&q->lock);
     }
     p->linux_is_thread = 0;
-    p->linux_group_leader = p;
-    p->linux_tgid = p->pid;
-    p->linux_thread_count = 1;
-    p->linux_group_exiting = 0;
-    p->linux_group_xstate = 0;
   }
   oldpagetable = p->pagetable;
   proc_munmapall(p);
   p->pagetable = pagetable;
-  p->sz = sz;
   p->is_linux = is_ext4;
   p->linux_signal_pending = 0;
   p->linux_pending_signal = 0;
@@ -338,11 +336,8 @@ kexec(char *path, char **argv)
   p->linux_share_files = 0;
   p->linux_share_fs = 0;
   p->linux_is_thread = 0;
-  p->linux_tgid = p->pid;
-  p->linux_group_leader = p;
-  p->linux_group_exiting = 0;
-  p->linux_group_xstate = 0;
-  p->linux_thread_count = 1;
+  if(reset_group || p->linux_group == 0)
+    linux_reset_thread_group(p);
   p->linux_rt_signal_handler = 0;
   p->linux_sigmask = 0;
   p->clear_child_tid = 0;
@@ -354,13 +349,12 @@ kexec(char *path, char **argv)
     vfs_set_proc_root(p, "/");
     p->linux_exe_path[0] = 0;
   }
-  p->mmap_base = MMAP_TOP;
   if(p->mm){
     p->mm->pagetable = p->pagetable;
-    p->mm->sz = p->sz;
-    p->mm->linux_brk = p->linux_brk;
-    p->mm->linux_brk_limit = p->linux_brk_limit;
-    p->mm->mmap_base = p->mmap_base;
+    p->mm->sz = sz;
+    p->mm->linux_brk = linux_brk;
+    p->mm->linux_brk_limit = linux_brk_limit;
+    p->mm->mmap_base = MMAP_TOP;
     memset(p->mm->vmas, 0, sizeof(p->mm->vmas));
   }
   p->trapframe->epc = entry;  // initial program counter

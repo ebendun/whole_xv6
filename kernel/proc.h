@@ -107,6 +107,17 @@ struct linux_mm {
   struct vma vmas[NVMA];
 };
 
+struct linux_thread_group {
+  struct spinlock lock;
+  int refcnt;
+  int tgid;
+  int exiting;
+  int xstate;
+  int thread_count;
+  struct proc *leader;
+  struct proc *members;
+};
+
 struct proc_vfs_path {
   struct vfs_mount *mount;
   char inner[MAXPATH];
@@ -133,7 +144,6 @@ struct proc {
 
   // these are private to the process, so p->lock need not be held.
   uint64 kstack;               // Virtual address of kernel stack
-  uint64 sz;                   // Size of process memory (bytes)
   int is_linux;                // Process is running a Linux ABI image
   int linux_signal_pending;    // Linux-ABI signal interrupt for blocking syscalls
   int linux_pending_signal;    // Linux signal to deliver before user return
@@ -146,15 +156,10 @@ struct proc {
   int linux_share_fs;          // Linux CLONE_FS-style shared cwd/root state
 
   int linux_is_thread;         // Linux CLONE_THREAD-style task
-  int linux_tgid;              // Linux thread-group id; pid for normal procs
-  int linux_group_exiting;     // thread group is being torn down
-  int linux_group_xstate;      // status supplied to exit_group
-  int linux_thread_count;      // live tasks, meaningful on group leader
-  struct proc *linux_group_leader; // leader of this Linux thread group
+  struct linux_thread_group *linux_group; // Linux thread-group membership
+  struct proc *linux_group_next; // next task in linux_group members list
   uint64 linux_rt_signal_handler; // handler installed for Linux rt signals
   uint64 linux_sigmask;        // Linux blocked signal mask
-  uint64 linux_brk;            // Current Linux ABI program break
-  uint64 linux_brk_limit;      // Highest Linux brk before the stack guard
   char linux_exe_path[MAXPATH]; // Absolute Linux-visible executable path
   struct linux_mm *mm;          // Linux-style shared address space metadata
   pagetable_t pagetable;       // User page table
@@ -168,8 +173,6 @@ struct proc {
   struct proc_vfs_path vfs_cwd; // Current directory in VFS terms
   char name[16];               // Process name (debugging)
   struct cpu *pincpu;
-  uint64 mmap_base;            // next mmap allocation address (grows down)
-  struct vma vmas[NVMA];
   uint64 clear_child_tid;      // Linux CLONE_CHILD_CLEARTID futex address
   uint64 robust_list;          // Linux robust futex list head
   uint64 robust_list_len;      // Length supplied to set_robust_list

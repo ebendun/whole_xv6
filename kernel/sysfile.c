@@ -109,25 +109,8 @@ linux_utime_find(char *path, int alloc)
 static void
 linux_share_vma_to_group(struct proc *p, struct vma *v)
 {
-  // CLONE_VM tasks need to see mmap regions created by sibling threads.
-  if(p->linux_share_vm == 0)
-    return;
-
-  for(struct proc *q = proc; q < &proc[NPROC]; q++){
-    if(q == p || q->state == UNUSED || q->pagetable == 0)
-      continue;
-    if(linux_tgid(q) != linux_tgid(p))
-      continue;
-    q->mmap_base = p->mmap_base;
-    for(int i = 0; i < NVMA; i++){
-      if(q->vmas[i].used == 0){
-        q->vmas[i] = *v;
-        if(q->vmas[i].f)
-          filedup(q->vmas[i].f);
-        break;
-      }
-    }
-  }
+  (void)p;
+  (void)v;
 }
 
 // Fetch the nth word-sized system call argument as a file descriptor
@@ -811,7 +794,6 @@ linux_mmap_create(uint64 addr, uint64 len, int prot, int flags, int fd,
   mm->vmas[slot].flags = flags;
   mm->vmas[slot].offset = offset;
   mm->vmas[slot].f = anonymous ? 0 : filedup(f);
-  linux_mm_apply_to_proc(p);
   linux_share_vma_to_group(p, &mm->vmas[slot]);
 
   return mapaddr;
@@ -972,7 +954,6 @@ linux_mprotect_one(struct proc *p, uint64 start, uint64 end, int prot)
           perm |= PTE_X;
         *pte = PA2PTE(pa) | perm | PTE_V;
       }
-      linux_mm_apply_to_proc(p);
       return 0;
     }
   }

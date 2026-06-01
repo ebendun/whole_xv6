@@ -260,7 +260,7 @@ sys_getpid(void)
 {
   // Linux processes report the thread-group id; xv6 processes report pid.
   struct proc *p = myproc();
-  if(p->linux_tgid != 0)
+  if(p->linux_group != 0)
     return linux_tgid(p);
   return p->pid;
 }
@@ -340,8 +340,6 @@ sys_sbrk(void)
     acquire(&myproc()->mm->lock);
     myproc()->mm->sz += n;
     release(&myproc()->mm->lock);
-    linux_mm_apply_to_proc(myproc());
-    linux_sync_vm_size(myproc());
   }
   return addr;
 }
@@ -386,8 +384,6 @@ sys_linux_brk(void)
   mm->linux_brk = addr;
   ret = mm->linux_brk;
   release(&mm->lock);
-  linux_mm_apply_to_proc(p);
-  linux_sync_vm_size(p);
   return ret;
 }
 

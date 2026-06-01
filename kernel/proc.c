@@ -24,14 +24,202 @@ extern void forkret(void);
 static void freeproc(struct proc *p);
 static int vmawriteback(struct proc *p, struct vma *v, uint64 addr, uint64 len);
 
+static struct linux_thread_group *
+linux_group_alloc(int tgid)
+{
+  struct linux_thread_group *g;
+
+  g = (struct linux_thread_group *)kalloc();
+  if(g == 0)
+    return 0;
+  memset(g, 0, sizeof(*g));
+  initlock(&g->lock, "linux_tgroup");
+  g->refcnt = 1;
+  g->tgid = tgid;
+  g->thread_count = 1;
+  return g;
+}
+
+static void
+linux_group_get(struct linux_thread_group *g)
+{
+  acquire(&g->lock);
+  g->refcnt++;
+  release(&g->lock);
+}
+
+static int
+linux_group_put(struct linux_thread_group *g)
+{
+  int freeit = 0;
+
+  acquire(&g->lock);
+  if(g->refcnt <= 0)
+    panic("linux_group_put");
+  g->refcnt--;
+  freeit = g->refcnt == 0;
+  release(&g->lock);
+  return freeit;
+}
+
+static void
+linux_group_free(struct linux_thread_group *g)
+{
+  kfree(g);
+}
+
+static void
+linux_group_add_member_locked(struct linux_thread_group *g, struct proc *p)
+{
+  p->linux_group = g;
+  p->linux_group_next = g->members;
+  g->members = p;
+  if(g->leader == 0)
+    g->leader = p;
+}
+
+static void
+linux_group_add_member(struct linux_thread_group *g, struct proc *p)
+{
+  acquire(&g->lock);
+  linux_group_add_member_locked(g, p);
+  release(&g->lock);
+}
+
+static void
+linux_group_remove_member(struct proc *p)
+{
+  struct linux_thread_group *g = p->linux_group;
+  struct proc **pp;
+
+  if(g == 0)
+    return;
+  acquire(&g->lock);
+  pp = &g->members;
+  while(*pp){
+    if(*pp == p){
+      *pp = p->linux_group_next;
+      break;
+    }
+    pp = &(*pp)->linux_group_next;
+  }
+  p->linux_group = 0;
+  p->linux_group_next = 0;
+  release(&g->lock);
+  if(linux_group_put(g))
+    linux_group_free(g);
+}
+
+static int
+linux_group_dec_live(struct linux_thread_group *g)
+{
+  int group_dead;
+
+  acquire(&g->lock);
+  if(g->thread_count > 0)
+    g->thread_count--;
+  group_dead = g->thread_count == 0;
+  release(&g->lock);
+  return group_dead;
+}
+
+static int
+linux_group_live_count(struct linux_thread_group *g)
+{
+  int n = 0;
+
+  if(g == 0)
+    return 0;
+  acquire(&g->lock);
+  n = g->thread_count;
+  release(&g->lock);
+  return n;
+}
+
+static int
+linux_group_exiting(struct linux_thread_group *g)
+{
+  int exiting = 0;
+
+  if(g == 0)
+    return 0;
+  acquire(&g->lock);
+  exiting = g->exiting;
+  release(&g->lock);
+  return exiting;
+}
+
+static int
+linux_group_xstate(struct linux_thread_group *g)
+{
+  int xstate = 0;
+
+  if(g == 0)
+    return 0;
+  acquire(&g->lock);
+  xstate = g->xstate;
+  release(&g->lock);
+  return xstate;
+}
+
+static void
+linux_group_set_exiting(struct linux_thread_group *g, int status)
+{
+  if(g == 0)
+    return;
+  acquire(&g->lock);
+  g->exiting = 1;
+  g->xstate = status;
+  release(&g->lock);
+}
+
+static int
+linux_group_is_empty(struct linux_thread_group *g)
+{
+  int empty;
+
+  if(g == 0)
+    return 1;
+  acquire(&g->lock);
+  empty = g->thread_count == 0;
+  release(&g->lock);
+  return empty;
+}
+
+int
+linux_group_make_single(struct proc *p)
+{
+  struct linux_thread_group *old = p->linux_group;
+  struct linux_thread_group *ng;
+
+  ng = linux_group_alloc(p->pid);
+  if(ng == 0)
+    return -1;
+  ng->leader = p;
+  if(old)
+    linux_group_dec_live(old);
+  linux_group_remove_member(p);
+  linux_group_add_member(ng, p);
+  return 0;
+}
+
+int
+linux_reset_thread_group(struct proc *p)
+{
+  return linux_group_make_single(p);
+}
+
 static struct proc *
 linux_group_leader(struct proc *p)
 {
-  if(p == 0)
+  struct proc *leader;
+
+  if(p == 0 || p->linux_group == 0)
     return 0;
-  if(p->linux_group_leader)
-    return p->linux_group_leader;
-  return p;
+  acquire(&p->linux_group->lock);
+  leader = p->linux_group->leader;
+  release(&p->linux_group->lock);
+  return leader ? leader : p;
 }
 
 int
@@ -39,17 +227,15 @@ linux_tgid(struct proc *p)
 {
   if(p == 0)
     return -1;
-  if(p->linux_tgid)
-    return p->linux_tgid;
-  if(p->linux_group_leader && p->linux_group_leader->linux_tgid)
-    return p->linux_group_leader->linux_tgid;
+  if(p->linux_group)
+    return p->linux_group->tgid;
   return p->pid;
 }
 
 static int
 linux_same_thread_group(struct proc *a, struct proc *b)
 {
-  return a && b && linux_tgid(a) == linux_tgid(b);
+  return a && b && a->linux_group && a->linux_group == b->linux_group;
 }
 
 static void
@@ -63,16 +249,19 @@ linux_clear_child_tid(struct proc *p)
   if(pa != 0)
     memmove((void *)pa, &zero, sizeof(zero));
 
-  for(struct proc *q = proc; q < &proc[NPROC]; q++){
+  if(p->linux_group == 0)
+    goto wake;
+  acquire(&p->linux_group->lock);
+  for(struct proc *q = p->linux_group->members; q; q = q->linux_group_next){
     if(q == p || q->state == UNUSED || q->pagetable == 0)
-      continue;
-    if(!linux_same_thread_group(p, q))
       continue;
     pa = walkaddr(q->pagetable, p->clear_child_tid);
     if(pa != 0)
       memmove((void *)pa, &zero, sizeof(zero));
   }
+  release(&p->linux_group->lock);
 
+ wake:
   linux_futex_wake(p->clear_child_tid);
 }
 
@@ -130,11 +319,13 @@ linux_handle_robust_list(struct proc *p)
 static void
 linux_drop_vma_refs(struct proc *p)
 {
+  if(p->mm == 0)
+    return;
   for(int i = 0; i < NVMA; i++){
-    if(p->vmas[i].used && p->vmas[i].f)
-      fileclose(p->vmas[i].f);
+    if(p->mm->vmas[i].used && p->mm->vmas[i].f)
+      fileclose(p->mm->vmas[i].f);
   }
-  memset(p->vmas, 0, sizeof(p->vmas));
+  memset(p->mm->vmas, 0, sizeof(p->mm->vmas));
 }
 
 static int
@@ -152,15 +343,18 @@ proc_pagetable_shared(struct proc *p)
 static void
 proc_free_userpagetable(struct proc *p)
 {
+  uint64 sz;
+
   if(p->pagetable == 0)
     return;
+  sz = p->mm ? p->mm->sz : 0;
 
   if(proc_pagetable_shared(p)){
     if(p->trapframe_va)
       //only delete the trapframe page
       uvmunmap(p->pagetable, p->trapframe_va, 1, 0);
   } else {
-    proc_freepagetable(p->pagetable, p->sz, p->trapframe_va);
+    proc_freepagetable(p->pagetable, sz, p->trapframe_va);
   }
   p->pagetable = 0;
 }
@@ -216,29 +410,15 @@ linux_sync_file_table(struct proc *src)
     linux_sync_fd_to_group(src, fd);
 }
 
-void
-linux_sync_vm_size(struct proc *src)
-{
-  if(src == 0 || src->linux_share_vm == 0)
-    return;
-
-  linux_mm_apply_to_proc(src);
-  for(struct proc *q = proc; q < &proc[NPROC]; q++){
-    if(q == src || q->state == UNUSED)
-      continue;
-    if(!linux_same_thread_group(src, q))
-      continue;
-    linux_mm_apply_to_proc(q);
-  }
-}
-
 static int
 copy_mapped_vma_pages(struct proc *src, struct proc *dst)
 {
   for(int i = 0; i < NVMA; i++){
-    if(src->vmas[i].used == 0)
+    if(src->mm->vmas[i].used == 0)
       continue;
-    for(uint64 a = src->vmas[i].addr; a < src->vmas[i].addr + src->vmas[i].len; a += PGSIZE){
+    for(uint64 a = src->mm->vmas[i].addr;
+        a < src->mm->vmas[i].addr + src->mm->vmas[i].len;
+        a += PGSIZE){
       pte_t *pte = walk(src->pagetable, a, 0);
       if(pte == 0 || (*pte & PTE_V) == 0 || (*pte & PTE_U) == 0)
         continue;
@@ -294,32 +474,6 @@ static void
 linux_mm_free(struct linux_mm *mm)
 {
   kfree(mm);
-}
-
-static void
-linux_mm_snapshot_from_proc(struct proc *p)
-{
-  if(p->mm == 0)
-    return;
-  p->mm->pagetable = p->pagetable;
-  p->mm->sz = p->sz;
-  p->mm->linux_brk = p->linux_brk;
-  p->mm->linux_brk_limit = p->linux_brk_limit;
-  p->mm->mmap_base = p->mmap_base;
-  memmove(p->mm->vmas, p->vmas, sizeof(p->vmas));
-}
-
-void
-linux_mm_apply_to_proc(struct proc *p)
-{
-  if(p->mm == 0)
-    return;
-  p->pagetable = p->mm->pagetable;
-  p->sz = p->mm->sz;
-  p->linux_brk = p->mm->linux_brk;
-  p->linux_brk_limit = p->mm->linux_brk_limit;
-  p->mmap_base = p->mm->mmap_base;
-  memmove(p->vmas, p->mm->vmas, sizeof(p->vmas));
 }
 
 // helps ensure that wakeups of wait()ing
@@ -440,10 +594,7 @@ found:
   safestrcpy(p->vfs_cwd.abs_path, "/", sizeof(p->vfs_cwd.abs_path));
   
   p->trapframe_va = TRAPFRAME_SLOT(p - proc);
-  p->mmap_base = MMAP_TOP;
   p->is_linux = 0;
-  p->linux_brk = 0;
-  p->linux_brk_limit = 0;
   p->linux_signal_pending = 0;
   p->linux_pending_signal = 0;
   p->linux_pending_sender = 0;
@@ -452,15 +603,17 @@ found:
   p->linux_share_files = 0;
   p->linux_share_fs = 0;
   p->linux_is_thread = 0;
-  p->linux_tgid = p->pid;
-  p->linux_group_exiting = 0;
-  p->linux_group_xstate = 0;
-  p->linux_thread_count = 1;
-  p->linux_group_leader = p;
+  p->linux_group = linux_group_alloc(p->pid);
+  if(p->linux_group == 0){
+    p->state = UNUSED;
+    release(&p->lock);
+    return 0;
+  }
+  p->linux_group->leader = p;
+  linux_group_add_member(p->linux_group, p);
   p->linux_rt_signal_handler = 0;
   p->linux_sigmask = 0;
   p->linux_exe_path[0] = 0;
-  memset(p->vmas, 0, sizeof(p->vmas));
   p->robust_list = 0;
   p->robust_list_len = 0;
   p->mm = linux_mm_alloc();
@@ -496,7 +649,7 @@ found:
     release(&p->lock);
     return 0;
   }
-  linux_mm_snapshot_from_proc(p);
+  p->mm->pagetable = p->pagetable;
 
   memset(&p->alarm_trapframe, 0, sizeof(p->alarm_trapframe));
   p->alarm_interval = 0;
@@ -534,8 +687,8 @@ freeproc(struct proc *p)
       linux_mm_free(p->mm);
     p->mm = 0;
   }
+  linux_group_remove_member(p);
   p->trapframe_va = 0;
-  p->sz = 0;
   p->is_linux = 0;
   p->linux_signal_pending = 0;
   p->linux_pending_signal = 0;
@@ -545,15 +698,10 @@ freeproc(struct proc *p)
   p->linux_share_files = 0;
   p->linux_share_fs = 0;
   p->linux_is_thread = 0;
-  p->linux_tgid = 0;
-  p->linux_group_exiting = 0;
-  p->linux_group_xstate = 0;
-  p->linux_thread_count = 0;
-  p->linux_group_leader = 0;
+  p->linux_group = 0;
+  p->linux_group_next = 0;
   p->linux_rt_signal_handler = 0;
   p->linux_sigmask = 0;
-  p->linux_brk = 0;
-  p->linux_brk_limit = 0;
   p->linux_exe_path[0] = 0;
   p->robust_list = 0;
   p->robust_list_len = 0;
@@ -577,8 +725,6 @@ freeproc(struct proc *p)
   p->alarm_ticks = 0;
   p->alarm_handler = 0;
   p->alarm_inflight = 0;
-  p->mmap_base = 0;
-  memset(p->vmas, 0, sizeof(p->vmas));
   p->clear_child_tid = 0;
   p->state = UNUSED;
 }
@@ -618,9 +764,7 @@ linux_interrupt(int tgid, int tid, int sig, int sender)
 static struct proc *
 linux_thread_leader(struct proc *p)
 {
-  if(p && p->linux_group_leader)
-    return p->linux_group_leader;
-  return p;
+  return linux_group_leader(p);
 }
 
 void
@@ -925,7 +1069,6 @@ proc_munmap(struct proc *p, uint64 addr, uint64 len)
 
     addr = unmap_end;
   }
-  linux_mm_apply_to_proc(p);
   return 0;
 }
 
@@ -1032,9 +1175,6 @@ growproc(int n)
   }
   mm->sz = sz;
   release(&mm->lock);
-  linux_mm_apply_to_proc(p);
-  if(p->linux_share_vm)
-    linux_sync_vm_size(p);
   return 0;
 }
 
@@ -1067,13 +1207,12 @@ forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, uint64 set_parent_tid,
       return -1;
     }
   } else {
-    if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
+    if(uvmcopy(p->pagetable, np->pagetable, p->mm->sz) < 0){
       freeproc(np);
       release(&np->lock);
       return -1;
     }
   }
-  np->sz = p->sz;
 
 
   // copy saved user registers.
@@ -1116,15 +1255,12 @@ forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, uint64 set_parent_tid,
   safestrcpy(np->vfs_cwd.abs_path, p->vfs_cwd.abs_path, sizeof(np->vfs_cwd.abs_path));
   np->interpose_mask = p->interpose_mask;
   safestrcpy(np->interpose_path, p->interpose_path, sizeof(np->interpose_path));
-  np->mmap_base = p->mmap_base;
   np->is_linux = p->is_linux;
   np->linux_share_vm = share_vm;
   np->linux_share_files = share_files;
   np->linux_share_fs = share_fs;
   np->linux_rt_signal_handler = p->linux_rt_signal_handler;
   np->linux_sigmask = p->linux_sigmask;
-  np->linux_brk = p->linux_brk;
-  np->linux_brk_limit = p->linux_brk_limit;
   safestrcpy(np->linux_exe_path, p->linux_exe_path, sizeof(np->linux_exe_path));
   np->robust_list = 0;
   np->robust_list_len = 0;
@@ -1134,13 +1270,18 @@ forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, uint64 set_parent_tid,
     np->mm = p->mm;
     linux_mm_get(np->mm);
   }
-  for(i = 0; i < NVMA; i++){
-    np->vmas[i] = p->vmas[i];
-    if(np->vmas[i].used && np->vmas[i].f)
-      filedup(np->vmas[i].f);
+  if(!share_vm){
+    np->mm->pagetable = np->pagetable;
+    np->mm->sz = p->mm->sz;
+    np->mm->linux_brk = p->mm->linux_brk;
+    np->mm->linux_brk_limit = p->mm->linux_brk_limit;
+    np->mm->mmap_base = p->mm->mmap_base;
+    for(i = 0; i < NVMA; i++){
+      np->mm->vmas[i] = p->mm->vmas[i];
+      if(np->mm->vmas[i].used && np->mm->vmas[i].f)
+        filedup(np->mm->vmas[i].f);
+    }
   }
-  if(!share_vm)
-    linux_mm_snapshot_from_proc(np);
   if(!share_vm && copy_mapped_vma_pages(p, np) < 0){
     linux_drop_vma_refs(np);
     proc_close_files(np);
@@ -1152,18 +1293,15 @@ forkat(uint64 stack, uint64 tls, uint64 clear_child_tid, uint64 set_parent_tid,
 
   np->linux_is_thread = clone_thread;
   if(clone_thread){
-    struct proc *leader = linux_group_leader(p);
-    np->linux_group_leader = leader;
-    np->linux_tgid = linux_tgid(leader);
-    np->linux_group_exiting = leader->linux_group_exiting;
-    np->linux_group_xstate = leader->linux_group_xstate;
-    leader->linux_thread_count++;
+    linux_group_remove_member(np);
+    linux_group_get(p->linux_group);
+    acquire(&p->linux_group->lock);
+    p->linux_group->thread_count++;
+    linux_group_add_member_locked(p->linux_group, np);
+    release(&p->linux_group->lock);
   } else {
-    np->linux_group_leader = np;
-    np->linux_tgid = pid;
-    np->linux_group_exiting = 0;
-    np->linux_group_xstate = 0;
-    np->linux_thread_count = 1;
+    np->linux_group->tgid = pid;
+    np->linux_group->leader = np;
   }
   if(share_files)
     p->linux_share_files = 1;
@@ -1224,8 +1362,9 @@ void
 kexit(int status)
 {
   struct proc *p = myproc();
+  struct linux_thread_group *group = p->linux_group;
   struct proc *leader = linux_group_leader(p);
-  int thread_only = leader && leader->linux_thread_count > 1;
+  int thread_only = linux_group_live_count(group) > 1;
   int group_dead = 1;
 
   if(p == initproc)
@@ -1244,10 +1383,7 @@ kexit(int status)
 
   acquire(&wait_lock);
 
-  if(leader && leader->linux_thread_count > 0)
-    leader->linux_thread_count--;
-  if(leader)
-    group_dead = leader->linux_thread_count == 0;
+  group_dead = linux_group_dec_live(group);
 
   if(group_dead)
     reparent(leader ? leader : p);
@@ -1258,7 +1394,7 @@ kexit(int status)
   
   acquire(&p->lock);
 
-  p->xstate = leader && leader->linux_group_exiting ? leader->linux_group_xstate : status;
+  p->xstate = linux_group_exiting(group) ? linux_group_xstate(group) : status;
   p->state = ZOMBIE;
 
   release(&wait_lock);
@@ -1272,21 +1408,15 @@ void
 kexit_group(int status)
 {
   struct proc *p = myproc();
-  struct proc *leader = linux_group_leader(p);
 
   acquire(&wait_lock);
-  if(leader){
-    leader->linux_group_exiting = 1;
-    leader->linux_group_xstate = status;
-  }
+  linux_group_set_exiting(p->linux_group, status);
   for(struct proc *q = proc; q < &proc[NPROC]; q++){
     if(q == p || q->state == UNUSED)
       continue;
     if(!linux_same_thread_group(p, q))
       continue;
     acquire(&q->lock);
-    q->linux_group_exiting = 1;
-    q->linux_group_xstate = status;
     q->killed = 1;
     if(q->state == SLEEPING)
       q->state = RUNNABLE;
@@ -1319,7 +1449,7 @@ kwait(uint64 addr)
         acquire(&pp->lock);
 
         havekids = 1;
-        if(pp->state == ZOMBIE && pp->linux_thread_count == 0){
+        if(pp->state == ZOMBIE && linux_group_is_empty(pp->linux_group)){
           // Found one.
           pid = pp->pid;
           if(addr != 0 && copyout(p->pagetable, addr, (char *)&pp->xstate,
@@ -1366,7 +1496,7 @@ kwait_options(uint64 addr, int options)
         continue;
       acquire(&pp->lock);
       havekids = 1;
-      if(pp->state == ZOMBIE && pp->linux_thread_count == 0){
+      if(pp->state == ZOMBIE && linux_group_is_empty(pp->linux_group)){
         pid = pp->pid;
         if(addr != 0 && copyout(p->pagetable, addr, (char *)&pp->xstate,
                                 sizeof(pp->xstate)) < 0){
@@ -1404,7 +1534,7 @@ kwait_linux(uint64 addr)
           continue;
         acquire(&pp->lock);
         havekids = 1;
-        if(pp->state == ZOMBIE && pp->linux_thread_count == 0){
+        if(pp->state == ZOMBIE && linux_group_is_empty(pp->linux_group)){
           int status = pp->xstate << 8;
           pid = pp->pid;
           if(addr != 0 && copyout(p->pagetable, addr, (char *)&status,
@@ -1462,7 +1592,7 @@ scheduler(void)
         release(&p->lock);
         continue;
       }
-      if(p->state == ZOMBIE && linux_group_leader(p) != p){
+      if(p->state == ZOMBIE && p->linux_is_thread){
         freeproc(p);
         release(&p->lock);
         continue;
