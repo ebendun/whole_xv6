@@ -9,6 +9,7 @@
 #include "fs.h"
 #include "sleeplock.h"
 #include "file.h"
+#include "flag.h"
 #include "linux_errno.h"
 
 struct cpu cpus[NCPU];
@@ -269,11 +270,7 @@ linux_clear_child_tid(struct proc *p)
 static void
 linux_handle_robust_list(struct proc *p)
 {
-  struct {
-    uint64 next;
-    long futex_offset;
-    uint64 pending;
-  } head;
+  struct linux_robust_list_head head;
   uint64 entry;
   uint64 seen = 0;
 
@@ -293,8 +290,9 @@ linux_handle_robust_list(struct proc *p)
     if(pa){
       int val;
       memmove(&val, (void *)pa, sizeof(val));
-      if((val & 0x3fffffff) == p->pid){
-        val = (val & ~0x3fffffff) | 0x40000000;
+      //Does the exit pid still hold the lock?
+      if((val & FUTEX_TID_MASK) == p->pid){
+        val = (val & ~FUTEX_TID_MASK) | FUTEX_OWNER_DIED;
         memmove((void *)pa, &val, sizeof(val));
         linux_futex_wake(uaddr);
       }
@@ -302,14 +300,19 @@ linux_handle_robust_list(struct proc *p)
     entry = next;
   }
 
+  // for race condition if create a new node but not insert to the list
+  // head->pending = &mutex->node;    tell kernel i will manipulate this node
+  // mutex->node.next = head->next;   start insert the Node but maybe have race condition
+  // head->next = &mutex->node;       finish insert
+  // the pending will be clean if insert the node successful
   if(head.pending){
     uint64 uaddr = head.pending + head.futex_offset;
     uint64 pa = walkaddr(p->pagetable, uaddr);
     if(pa){
       int val;
       memmove(&val, (void *)pa, sizeof(val));
-      if((val & 0x3fffffff) == p->pid){
-        val = (val & ~0x3fffffff) | 0x40000000;
+      if((val & FUTEX_TID_MASK) == p->pid){
+        val = (val & ~FUTEX_TID_MASK) | FUTEX_OWNER_DIED;
         memmove((void *)pa, &val, sizeof(val));
         linux_futex_wake(uaddr);
       }
@@ -1430,7 +1433,8 @@ reparent(struct proc *p)
 
 // Exit the current process.  Does not return.
 // An exited process remains in the zombie state
-// until its parent calls wait().
+// until its parent calls wait()
+// cause the parent process should know who is died and some extra info
 void
 kexit(int status)
 {
@@ -1874,12 +1878,13 @@ wakeup(void *chan)
 
 // Kill the process with the given pid.
 // The victim won't exit until it tries to return
-// to user space (see usertrap() in trap.c).
+// to user space (see usertrap() in trap.c)
+// cause then it's a safe time
 int
 kkill(int pid)
 {
   struct proc *p;
-  int killed_any = 0;
+  int kill_sth = 0;
 
   for(p = proc; p < &proc[NPROC]; p++){
     acquire(&p->lock);
@@ -1890,12 +1895,12 @@ kkill(int pid)
         p->state = RUNNABLE;
       }
       release(&p->lock);
-      killed_any = 1;
+      kill_sth = 1;
       continue;
     }
     release(&p->lock);
   }
-  return killed_any ? 0 : -1;
+  return kill_sth ? 0 : -1;
 }
 
 void

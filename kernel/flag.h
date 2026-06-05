@@ -24,4 +24,9 @@
 #define FUTEX_PRIVATE_FLAG   0x80
 #define FUTEX_CLOCK_REALTIME 0x100
 
+//low 30 bit
+#define FUTEX_TID_MASK       0x3fffffff
+//set it to dead
+#define FUTEX_OWNER_DIED     0x40000000
+
 #endif

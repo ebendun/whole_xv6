@@ -28,6 +28,13 @@ struct cpu {
 
 extern struct cpu cpus[NCPU];
 
+// Linux robust futex list head registered by set_robust_list().
+struct linux_robust_list_head {
+  uint64 next;
+  long futex_offset;
+  uint64 pending;
+};
+
 // Per-process data for the trap handling code in trampoline.S.
 //
 // This page sits just below the trampoline page in the user page table,

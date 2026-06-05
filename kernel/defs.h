@@ -125,6 +125,7 @@ void            scheduler(void) __attribute__((noreturn));
 void            sched(void);
 void            sleep(void*, struct spinlock*);
 int             futex_timed_sleep(void*, struct spinlock*, uint);
+void            futexinit(void);
 void            futex_set_bitset(uint);
 void            futex_tick(uint);
 void            userinit(void);

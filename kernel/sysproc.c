@@ -14,7 +14,6 @@
 #include "linux_errno.h"
 
 static struct spinlock futex_lock;
-static int futex_lock_inited;
 static uint64 wall_base_sec;
 static uint wall_base_ticks;
 static int wall_time_inited;
@@ -79,13 +78,10 @@ linux_wall_timespec(uint64 *sec, uint64 *nsec)
   }
 }
 
-static void
-futex_init(void)
+void
+futexinit(void)
 {
-  if(futex_lock_inited == 0){
-    initlock(&futex_lock, "futex");
-    futex_lock_inited = 1;
-  }
+  initlock(&futex_lock, "futex");
 }
 
 uint64
@@ -101,6 +97,8 @@ sys_halt(void)
   return 0;
 }
 
+// concatenate the chnnel
+// for channel high 16 bit is the tgid the low 48 bit is futex addr
 static void *
 linux_futex_chan_for(struct proc *p, uint64 uaddr)
 {
@@ -120,7 +118,6 @@ linux_futex_wake(uint64 uaddr)
   // Wake every task sleeping on the same user-space futex word.
   void *chan = linux_futex_chan(uaddr);
 
-  futex_init();
   acquire(&futex_lock);
   for(struct proc *p = proc; p < &proc[NPROC]; p++){
     if(p == myproc())
@@ -758,8 +755,6 @@ sys_linux_futex(void)
   if((op == 9 || op == 10) && bitset == 0)
     return -LINUX_EINVAL;
 
-  futex_init();
-
   switch(op){
   case 0:  // FUTEX_WAIT
   case 9:  // FUTEX_WAIT_BITSET
@@ -838,7 +833,6 @@ sys_linux_futex(void)
   case 1:  // FUTEX_WAKE
   case 10: // FUTEX_WAKE_BITSET
   {
-    futex_init();
     acquire(&futex_lock);
     int count = linux_futex_wake_n_locked(uaddr, val, bitset);
     release(&futex_lock);
@@ -846,7 +840,6 @@ sys_linux_futex(void)
   }
   case 3:  // FUTEX_REQUEUE
   {
-    futex_init();
     acquire(&futex_lock);
     int nrrequeue = (int)myproc()->trapframe->a3;
     int count = linux_futex_requeue_locked(uaddr, val, uaddr2, nrrequeue);
@@ -859,7 +852,6 @@ sys_linux_futex(void)
       return -LINUX_EFAULT;
     if(cur != val3)
       return -LINUX_EAGAIN;
-    futex_init();
     acquire(&futex_lock);
     int nrrequeue = (int)myproc()->trapframe->a3;
     int count = linux_futex_requeue_locked(uaddr, val, uaddr2, nrrequeue);

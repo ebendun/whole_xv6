@@ -23,6 +23,7 @@ main()
     kvminit();       // create kernel page table
     kvminithart();   // turn on paging
     procinit();      // process table
+    futexinit();     // Linux futex wait lock
     trapinit();      // trap vectors
     trapinithart();  // install kernel trap vector
     w_sie(r_sie() | SIE_SEIE | SIE_STIE);
