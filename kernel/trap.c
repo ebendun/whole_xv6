@@ -8,6 +8,7 @@
 #include "defs.h"
 
 struct rwspinlock tickslock;
+// 10 ticks = 1 second
 uint ticks;
 
 extern char trampoline[], uservec[];

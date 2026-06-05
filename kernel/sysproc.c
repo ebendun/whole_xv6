@@ -41,6 +41,8 @@ linux_wall_time_init(void)
   b = bread(FIRSTDEV, 0);
   // ext4 superblock starts 1024 bytes into the volume. s_mtime is at
   // offset 44 and s_wtime at offset 48 within the superblock.
+  // s_mtime: last mount time
+  // s_wtime: last write time
   mtime = le32(b->data + 1024 + 44);
   wtime = le32(b->data + 1024 + 48);
   brelse(b);
@@ -56,13 +58,15 @@ linux_wall_time_init(void)
   wall_time_inited = wall_base_sec != 0;
 }
 
+// acquire the wall time 
 void
 linux_wall_timespec(uint64 *sec, uint64 *nsec)
 {
   uint now;
   uint delta;
 
-  linux_wall_time_init();
+  if(wall_time_inited == 0)
+    linux_wall_time_init();
 
   acquire(&tickslock.l);
   now = ticks;
@@ -237,9 +241,9 @@ linux_futex_wake_op(uint64 uaddr, uint64 uaddr2, int nrwake, int nrwake2,
     return -LINUX_EFAULT;
 
   // Wake uaddr waiters unconditionally; wake uaddr2 waiters only if cmp passes.
-  int count = linux_futex_wake_n_locked(uaddr, nrwake, 0xffffffffU);
+  int count = linux_futex_wake_n_locked(uaddr, nrwake, FUTEX_BITSET_MATCH_ANY);
   if(linux_futex_cmp(old, cmp, cmparg))
-    count += linux_futex_wake_n_locked(uaddr2, nrwake2, 0xffffffffU);
+    count += linux_futex_wake_n_locked(uaddr2, nrwake2, FUTEX_BITSET_MATCH_ANY);
   return count;
 }
 
@@ -470,7 +474,7 @@ sys_linux_uname(void)
   char *fields[] = {
     "Linux",
     "xv6",
-    "0.0.1",
+    "5.10.0",
     "xv6-linux-compat",
     "riscv64",
     "xv6",
@@ -539,11 +543,11 @@ sys_linux_clock_gettime(void)
 {
   // Return wall time derived from the sdcard ext4 timestamp plus uptime.
   uint64 addr;
-  uint64 ts[2];
+  struct linux_timespec ts;
 
   argaddr(1, &addr);
-  linux_wall_timespec(&ts[0], &ts[1]);
-  if(copyout(myproc()->pagetable, addr, (char *)ts, sizeof(ts)) < 0)
+  linux_wall_timespec(&ts.sec, &ts.nsec);
+  if(copyout(myproc()->pagetable, addr, (char *)&ts, sizeof(ts)) < 0)
     return -1;
   return 0;
 }
@@ -746,56 +750,69 @@ sys_linux_futex(void)
   argaddr(0, &uaddr);
   argint(1, &op);
   argint(2, &val);
+  // cause the forth parameter's type is unsure 
+  // so direct acquire by using a3 register
   argaddr(4, &uaddr2);
   argint(5, &val3);
-  rawop = op;
+  // save the primitive op val
+  rawop = op; 
   realtime = (rawop & FUTEX_CLOCK_REALTIME) != 0;
+  // for simple remove the private flag
   op &= ~(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
-  bitset = (op == 9 || op == 10) ? (uint)val3 : 0xffffffffU;
-  if((op == 9 || op == 10) && bitset == 0)
+  bitset = (op == FUTEX_WAIT_BITSET || op == FUTEX_WAKE_BITSET) ?
+           (uint)val3 : FUTEX_BITSET_MATCH_ANY;
+  if((op == FUTEX_WAIT_BITSET || op == FUTEX_WAKE_BITSET) && bitset == 0)
     return -LINUX_EINVAL;
 
   switch(op){
-  case 0:  // FUTEX_WAIT
-  case 9:  // FUTEX_WAIT_BITSET
+  case FUTEX_WAIT:
+  case FUTEX_WAIT_BITSET:
     // Verify the futex value before sleeping to avoid lost wakeups.
+    // if have timeout flag
     if(myproc()->trapframe->a3 != 0){
-      uint64 ts[2];
+      struct linux_timespec ts;
       uint deadline, timeout;
-      if(copyin(myproc()->pagetable, (char *)ts, myproc()->trapframe->a3,
+      if(copyin(myproc()->pagetable, (char *)&ts, myproc()->trapframe->a3,
                 sizeof(ts)) < 0)
         return -LINUX_EFAULT;
+      // realtime flag
       if(realtime){
         uint64 now_sec, now_nsec;
         uint64 target_nsec;
         uint64 now_total_nsec;
 
         linux_wall_timespec(&now_sec, &now_nsec);
-        if(ts[0] < now_sec || (ts[0] == now_sec && ts[1] <= now_nsec))
+        if(ts.sec < now_sec || (ts.sec == now_sec && ts.nsec <= now_nsec))
           return -LINUX_ETIMEDOUT;
-        target_nsec = ts[0] * 1000000000ULL + ts[1];
+        target_nsec = ts.sec * 1000000000ULL + ts.nsec;
         now_total_nsec = now_sec * 1000000000ULL + now_nsec;
+        // round up formula
         timeout = (target_nsec - now_total_nsec + 99999999) / 100000000;
       } else {
-        timeout = ts[0] * 10 + (ts[1] + 99999999) / 100000000;
+        timeout = ts.sec * 10 + (ts.nsec + 99999999) / 100000000;
       }
       if(timeout == 0)
         timeout = 1;
+      // futex realtime min timeout ticks
       if(realtime && timeout < 30)
         timeout = 30;
+
       read_acquire(&tickslock);
       deadline = ticks + timeout;
       read_release(&tickslock);
+
       if(copyin(myproc()->pagetable, (char *)&cur, uaddr, sizeof(cur)) < 0){
         if(vmfault(myproc()->pagetable, uaddr, 1) == 0 ||
            copyin(myproc()->pagetable, (char *)&cur, uaddr, sizeof(cur)) < 0)
           return -LINUX_EFAULT;
       }
+      // in case of lost wakeup
       acquire(&futex_lock);
       if(copyin(myproc()->pagetable, (char *)&cur, uaddr, sizeof(cur)) < 0){
         release(&futex_lock);
         return -LINUX_EFAULT;
       }
+      // if the lock is already release
       if(cur != val){
         release(&futex_lock);
         return -LINUX_EAGAIN;
@@ -809,6 +826,8 @@ sys_linux_futex(void)
         return -LINUX_ETIMEDOUT;
       return 0;
     }
+
+    // if not have timeout flag
     if(copyin(myproc()->pagetable, (char *)&cur, uaddr, sizeof(cur)) < 0){
       if(vmfault(myproc()->pagetable, uaddr, 1) == 0 ||
          copyin(myproc()->pagetable, (char *)&cur, uaddr, sizeof(cur)) < 0)
@@ -830,15 +849,16 @@ sys_linux_futex(void)
     if(linux_take_interrupt())
       return -LINUX_EINTR;
     return 0;
-  case 1:  // FUTEX_WAKE
-  case 10: // FUTEX_WAKE_BITSET
+
+  case FUTEX_WAKE:
+  case FUTEX_WAKE_BITSET:
   {
     acquire(&futex_lock);
     int count = linux_futex_wake_n_locked(uaddr, val, bitset);
     release(&futex_lock);
     return count;
   }
-  case 3:  // FUTEX_REQUEUE
+  case FUTEX_REQUEUE:
   {
     acquire(&futex_lock);
     int nrrequeue = (int)myproc()->trapframe->a3;
@@ -846,7 +866,7 @@ sys_linux_futex(void)
     release(&futex_lock);
     return count;
   }
-  case 4:  // FUTEX_CMP_REQUEUE
+  case FUTEX_CMP_REQUEUE:
     // Requeue only if the futex word still matches val3.
     if(copyin(myproc()->pagetable, (char *)&cur, uaddr, sizeof(cur)) < 0)
       return -LINUX_EFAULT;
@@ -857,7 +877,8 @@ sys_linux_futex(void)
     int count = linux_futex_requeue_locked(uaddr, val, uaddr2, nrrequeue);
     release(&futex_lock);
     return count;
-  case 5:  // FUTEX_WAKE_OP
+    
+  case FUTEX_WAKE_OP:
     acquire(&futex_lock);
     int r = linux_futex_wake_op(uaddr, uaddr2, val, val3, (int)myproc()->trapframe->a3);
     release(&futex_lock);
@@ -920,13 +941,13 @@ sys_linux_nanosleep(void)
 {
   // Sleep for a Linux timespec duration, rounded up to xv6 ticks.
   uint64 addr;
-  uint64 ts[2];
+  struct linux_timespec ts;
   uint target, start;
 
   argaddr(0, &addr);
-  if(copyin(myproc()->pagetable, (char *)ts, addr, sizeof(ts)) < 0)
+  if(copyin(myproc()->pagetable, (char *)&ts, addr, sizeof(ts)) < 0)
     return -1;
-  target = ts[0] * 10 + (ts[1] + 99999999) / 100000000;
+  target = ts.sec * 10 + (ts.nsec + 99999999) / 100000000;
   if(target == 0)
     return 0;
 
@@ -948,30 +969,30 @@ sys_linux_clock_nanosleep(void)
 {
   int clockid, flags;
   uint64 req;
-  uint64 ts[2];
+  struct linux_timespec ts;
   uint target, start;
 
   argint(0, &clockid);
   argint(1, &flags);
   argaddr(2, &req);
-  if(req == 0 || copyin(myproc()->pagetable, (char *)ts, req, sizeof(ts)) < 0)
+  if(req == 0 || copyin(myproc()->pagetable, (char *)&ts, req, sizeof(ts)) < 0)
     return -LINUX_EFAULT;
   if(clockid != 0 && clockid != 1)
     return -LINUX_EINVAL;
-  if(ts[1] >= 1000000000ULL)
+  if(ts.nsec >= 1000000000ULL)
     return -LINUX_EINVAL;
 
   if(flags & 1){ // TIMER_ABSTIME
     uint64 now_sec, now_nsec, target_ns, now_ns;
 
     linux_wall_timespec(&now_sec, &now_nsec);
-    if(ts[0] < now_sec || (ts[0] == now_sec && ts[1] <= now_nsec))
+    if(ts.sec < now_sec || (ts.sec == now_sec && ts.nsec <= now_nsec))
       return 0;
-    target_ns = ts[0] * 1000000000ULL + ts[1];
+    target_ns = ts.sec * 1000000000ULL + ts.nsec;
     now_ns = now_sec * 1000000000ULL + now_nsec;
     target = (target_ns - now_ns + 99999999) / 100000000;
   } else {
-    target = ts[0] * 10 + (ts[1] + 99999999) / 100000000;
+    target = ts.sec * 10 + (ts.nsec + 99999999) / 100000000;
   }
   if(target == 0)
     return 0;

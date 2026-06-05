@@ -17,6 +17,7 @@
 #include "sleeplock.h"
 #include "file.h"
 #include "fcntl.h"
+#include "flag.h"
 #include "linux_errno.h"
 #include "vfs.h"
 
@@ -32,8 +33,8 @@ static int linux_stat_proc_path(struct proc *p, char *path, struct vfs_path *vp,
                                 int actualsz);
 static void linux_apply_times(uint64 *atime_sec, uint64 *atime_nsec,
                               uint64 *mtime_sec, uint64 *mtime_nsec,
-                              int have_ts, uint64 *ts, uint64 now_sec,
-                              uint64 now_nsec);
+                              int have_ts, struct linux_timespec *ts,
+                              uint64 now_sec, uint64 now_nsec);
 static int vfs_prepare_write_path(struct proc *p, char *path, char *actual,
                                   int actualsz, struct vfs_path *vp);
 static int vfs_sync_legacy_cwd(struct proc *p, struct vfs_path *vp);
@@ -1104,7 +1105,7 @@ linux_stat_proc_path(struct proc *p, char *path, struct vfs_path *vp,
 static void
 linux_apply_times(uint64 *atime_sec, uint64 *atime_nsec,
                   uint64 *mtime_sec, uint64 *mtime_nsec, int have_ts,
-                  uint64 *ts, uint64 now_sec, uint64 now_nsec)
+                  struct linux_timespec *ts, uint64 now_sec, uint64 now_nsec)
 {
   if(have_ts == 0){
     *atime_sec = now_sec;
@@ -1114,22 +1115,22 @@ linux_apply_times(uint64 *atime_sec, uint64 *atime_nsec,
     return;
   }
 
-  if(ts[1] != LINUX_UTIME_OMIT){
-    if(ts[1] == LINUX_UTIME_NOW){
+  if(ts[0].nsec != LINUX_UTIME_OMIT){
+    if(ts[0].nsec == LINUX_UTIME_NOW){
       *atime_sec = now_sec;
       *atime_nsec = now_nsec;
     } else {
-      *atime_sec = ts[0];
-      *atime_nsec = ts[1];
+      *atime_sec = ts[0].sec;
+      *atime_nsec = ts[0].nsec;
     }
   }
-  if(ts[3] != LINUX_UTIME_OMIT){
-    if(ts[3] == LINUX_UTIME_NOW){
+  if(ts[1].nsec != LINUX_UTIME_OMIT){
+    if(ts[1].nsec == LINUX_UTIME_NOW){
       *mtime_sec = now_sec;
       *mtime_nsec = now_nsec;
     } else {
-      *mtime_sec = ts[2];
-      *mtime_nsec = ts[3];
+      *mtime_sec = ts[1].sec;
+      *mtime_nsec = ts[1].nsec;
     }
   }
 }
@@ -1660,7 +1661,7 @@ sys_linux_utimensat(void)
   char path[MAXPATH];
   char actual[MAXPATH];
   uint64 now_sec, now_nsec;
-  uint64 ts[4];
+  struct linux_timespec ts[2];
   int have_ts = 0;
   struct file *f = 0;
   struct vfs_node node;

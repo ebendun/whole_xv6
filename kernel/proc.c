@@ -1793,7 +1793,7 @@ sleep(void *chan, struct spinlock *lk)
   // Go to sleep.
   p->chan = chan;
   if(p->futex_bitset == 0)
-    p->futex_bitset = 0xffffffffU;
+    p->futex_bitset = FUTEX_BITSET_MATCH_ANY;
   p->state = SLEEPING;
 
   sched();
@@ -1818,7 +1818,7 @@ futex_timed_sleep(void *chan, struct spinlock *lk, uint deadline)
 
   p->chan = chan;
   if(p->futex_bitset == 0)
-    p->futex_bitset = 0xffffffffU;
+    p->futex_bitset = FUTEX_BITSET_MATCH_ANY;
   p->futex_deadline = deadline;
   p->futex_timedout = 0;
   p->state = SLEEPING;
